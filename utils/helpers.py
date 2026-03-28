@@ -3,11 +3,20 @@ from datetime import datetime
 from dateutil import parser
 import hashlib
 
-def clean_text(text):
+def clean_text(text, preserve_newlines=False):
     """Clean and normalize text"""
     if not text:
         return None
-    text = re.sub(r'\s+', ' ', text)
+        
+    if preserve_newlines:
+        # Strip horizontal whitespace (spaces, tabs) but keep newlines
+        text = re.sub(r'[^\S\n]+', ' ', text)
+        # Clean up multiple consecutive newlines
+        text = re.sub(r'\n\s*\n', '\n', text)
+    else:
+        # Strip all whitespace including newlines
+        text = re.sub(r'\s+', ' ', text)
+        
     return text.strip()
 
 def parse_date(date_string):

@@ -16,6 +16,10 @@ class Config:
     MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     
+    # Grants.gov endpoints
+    GRANTS_GOV_BASE_URL = os.getenv('GRANTS_GOV_BASE_URL', 'https://www.grants.gov')
+    GRANTS_GOV_API_URL = os.getenv('GRANTS_GOV_API_URL', 'https://api.grants.gov/v1/api/search2')
+    
     # User Agents
     USER_AGENTS = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
