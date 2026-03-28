@@ -116,6 +116,13 @@ class ScraperOrchestrator:
                 # Process and store opportunities
                 self.process_opportunities(opportunities)
                 
+            except KeyboardInterrupt:
+                logger.warning(f"\n⚠️ User interruption detected during {scraper.source_name} execution. Rescuing scraped data before shutdown...")
+                if getattr(scraper, 'opportunities', None):
+                    logger.info(f"Rescuing {len(scraper.opportunities)} pending opportunities...")
+                    self.process_opportunities(scraper.opportunities)
+                raise  # Re-raise to shutdown the overarching main() loop safely
+                
             except Exception as e:
                 logger.error(f"Error running scraper {scraper.source_name}: {e}")
                 self.stats['total_errors'] += 1

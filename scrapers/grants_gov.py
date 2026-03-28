@@ -5,6 +5,7 @@ from scrapers.base_scraper import BaseScraper
 from config.settings import config
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
+from database.db import db
 
 # Selenium imports
 from selenium import webdriver
@@ -49,6 +50,10 @@ class GrantsGovScraper(BaseScraper):
             'Current Closing Date for Applications:',
             'Original Closing Date for Applications:',
         ],
+        'category': [
+            'Opportunity Category:',
+            'Category of Funding Activity:'
+        ]
     }
 
     # How long to wait for a detail page to render (seconds)
@@ -117,43 +122,58 @@ class GrantsGovScraper(BaseScraper):
             List of opportunity dicts ready for DB insertion.
         """
         if keywords is None:
-            keywords = ["health", "education", "technology", "environment", "community"]
+            keywords = [
+                "health", "education", "technology", "environment", "community",
+                "research", "agriculture", "energy", "justice", "transportation",
+                "housing", "veterans", "arts", "humanities", "small business",
+                "infrastructure", "cybersecurity", "manufacturing", "workforce"
+            ]
         elif isinstance(keywords, str):
             keywords = [keywords]
 
         logger.info(f"Starting {self.source_name} scraper with "
                     f"{len(keywords)} keyword(s), max {max_pages} pages each")
+        logger.info(f"\n🚀 Starting {self.source_name} scraper with {len(keywords)} keyword(s), max {max_pages} pages each")
 
         # Initialize Selenium once for all detail fetches
         selenium_available = self._init_driver()
         if not selenium_available:
             logger.warning("Detail page scraping disabled — API-only mode")
+            logger.info("⚠️ Detail page scraping disabled — running in API-only mode")
+        else:
+            logger.info("✅ Chrome driver initialized")
 
         seen_ids = set()  # Track IDs across keywords to avoid duplicate processing
 
         try:
             for keyword in keywords:
                 logger.info(f"Searching keyword: '{keyword}'")
+                logger.info(f"\n🔍 Searching keyword: '{keyword}'")
                 keyword_count = 0
+                sequential_duplicates = 0
+                skip_keyword = False
 
                 for page in range(max_pages):
+                    if skip_keyword:
+                        break
+                        
                     # Step 1: Fetch a page of results from the API
                     api_results = self._search_api(keyword, page)
 
                     if api_results is None:
                         logger.warning(f"API request failed for keyword='{keyword}', "
                                       f"page={page + 1} — skipping rest of this keyword")
+                        logger.info(f"❌ API request failed for keyword='{keyword}', page={page + 1}")
                         break
 
                     if not api_results:
-                        logger.info(f"No more results for keyword='{keyword}' "
-                                   f"after page {page + 1}")
+                        logger.info(f"ℹ️ No more results for '{keyword}' after page {page + 1}")
                         break
 
                     for opp_data in api_results:
                         opp_id = opp_data.get('id')
 
-                        # Skip if already processed (from another keyword)
+                        # Skip if already processed in this current run
                         if opp_id in seen_ids:
                             continue
                         seen_ids.add(opp_id)
@@ -163,25 +183,42 @@ class GrantsGovScraper(BaseScraper):
                         if opportunity is None:
                             continue
 
+                        # DB Deduplication Check: if it already exists in Supabase, skip Selenium
+                        if db.opportunity_exists(opportunity['source_url']):
+                            sequential_duplicates += 1
+                            logger.info(f"  ⏭️  Skipped DB duplicate: {opportunity['title'][:50]}...")
+                            
+                            # If we hit 10 duplicates in a row, assume everything older is also a duplicate
+                            if sequential_duplicates >= 10:
+                                logger.info(f"  🛑 Hit 10 duplicates in a row. Skipping rest of keyword '{keyword}'.")
+                                skip_keyword = True
+                                break
+                            continue
+                        
+                        # Not a duplicate, reset the duplicate counter
+                        sequential_duplicates = 0
+
                         # Step 3: Enrich with detail page (Selenium)
                         if selenium_available:
                             details = self._fetch_detail_page(opportunity['source_url'])
                             if details:
                                 opportunity = self._merge_details(opportunity, details)
 
-                        # Step 4: Auto-categorize with whatever data we have
-                        opportunity['category'] = categorize_opportunity(
-                            opportunity['title'] or '',
-                            opportunity['description'] or ''
-                        )
+                        # Step 4: Auto-categorize only if no official category was found
+                        if not opportunity.get('category'):
+                            opportunity['category'] = categorize_opportunity(
+                                opportunity['title'] or '',
+                                opportunity['description'] or ''
+                            )
 
                         self.opportunities.append(opportunity)
                         keyword_count += 1
+                        logger.info(f"  ✅ Extracted: {opportunity['title'][:60]}...")
 
-                    logger.info(f"  Page {page + 1}: processed {len(api_results)} hits, "
-                               f"{keyword_count} new for keyword '{keyword}'")
-
-                logger.info(f"Keyword '{keyword}' complete: {keyword_count} new opportunities")
+                    logger.info(f"📄 Page {page + 1} complete. Total for '{keyword}' so far: {keyword_count}")
+                    
+                keyword_results[keyword] = keyword_count
+                logger.info(f"🏁 Keyword '{keyword}' complete. Found {keyword_count} new opportunities.")
 
         finally:
             # Always clean up Selenium
@@ -309,12 +346,15 @@ class GrantsGovScraper(BaseScraper):
             # Give JS a bit more time to finish rendering
             time.sleep(self.DETAIL_PAGE_RENDER_WAIT)
 
-            # Extract the full body text
+            # Extract the full body text using BeautifulSoup to preserve <br> as newlines
             try:
-                body_element = self._driver.find_element(By.TAG_NAME, 'body')
-                page_text = body_element.text
-            except NoSuchElementException:
-                logger.warning(f"No body element found: {detail_url}")
+                soup = self.parse_html(self._driver.page_source)
+                if soup and soup.body:
+                    page_text = soup.body.get_text(separator='\n', strip=True)
+                else:
+                    page_text = ""
+            except Exception as e:
+                logger.warning(f"Failed to parse page source: {e}")
                 return None
 
             if not page_text or len(page_text) < 100:
@@ -369,6 +409,8 @@ class GrantsGovScraper(BaseScraper):
                     parsed = parse_date(value)
                     if parsed:
                         details[field_name] = parsed
+                elif field_name == 'eligibility':
+                    details[field_name] = clean_text(value, preserve_newlines=True)
                 else:
                     details[field_name] = clean_text(value)
 
@@ -401,12 +443,12 @@ class GrantsGovScraper(BaseScraper):
                 if after_label.startswith(':'):
                     after_label = after_label[1:].strip()
 
-                if after_label and self._is_valid_value(after_label):
-                    return after_label
-
-                # Format 2: Value is on the next non-empty line(s)
                 value_parts = []
-                for j in range(i + 1, min(i + 10, len(lines))):
+                if after_label and self._is_valid_value(after_label):
+                    value_parts.append(after_label)
+
+                # Format 2: Value is on the next non-empty line(s) (or continues from Format 1)
+                for j in range(i + 1, min(i + 40, len(lines))):
                     next_line = lines[j].strip()
                     if not next_line:
                         if value_parts:
@@ -420,7 +462,7 @@ class GrantsGovScraper(BaseScraper):
                     value_parts.append(next_line)
 
                 if value_parts:
-                    return ' '.join(value_parts)
+                    return '\n'.join(value_parts)
 
         return None
 
@@ -437,6 +479,9 @@ class GrantsGovScraper(BaseScraper):
             'description', 'grantor contact', 'link to additional',
             'version', 'posted date', 'last updated', 'archive date',
             'award ceiling', 'award floor', 'estimated total',
+            'category explanation', 'expected number of awards', 
+            'assistance listings', 'cost sharing or matching requirements',
+            'funding instrument type'
         ]
         all_labels.extend(section_headers)
         
@@ -536,6 +581,10 @@ class GrantsGovScraper(BaseScraper):
             if detail_val and not opportunity.get(field):
                 opportunity[field] = detail_val
 
+        # Category: always prefer detail page over auto-guess
+        if details.get('category'):
+            opportunity['category'] = details.get('category')
+
         # Deadline: prefer detail page if API didn't have one
         detail_deadline = details.get('deadline')
         if detail_deadline and not opportunity.get('deadline'):
@@ -549,3 +598,45 @@ class GrantsGovScraper(BaseScraper):
             opportunity['document_urls'] = merged
 
         return opportunity
+
+
+if __name__ == "__main__":
+    from database.db import db
+    import sys
+
+    scraper = GrantsGovScraper()
+    
+    try:
+        # Scrape with default keywords (all 19 of them) and max 3 pages each
+        opps = scraper.scrape(max_pages=3)
+    except KeyboardInterrupt:
+        print("\n\n🛑 Script stopped manually!")
+        opps = scraper.opportunities
+    except Exception as e:
+        print(f"\n\n💥 Script crashed: {e}")
+        opps = scraper.opportunities
+    finally:
+        print(f"\nRescuing {len(opps)} opportunities scraped so far...\n")
+        print("⏳ Connecting to Supabase... (Please DO NOT press Ctrl+C again!)\n")
+        
+        for i, opp in enumerate(opps[:3]):
+            print(f"--- #{i+1} ---")
+            for k, v in opp.items():
+                print(f"  {k}: {str(v)[:150]}")
+            print()
+
+        # Insert to DB
+        inserted = 0
+        try:
+            for opp in opps:
+                result = db.insert_opportunity(opp)
+                if result:
+                    inserted += 1
+        except KeyboardInterrupt:
+            print("\n\n⚠️ Rescue interrupted by second Ctrl+C! Stopping DB inserts.")
+        except Exception as e:
+            print(f"\n\n💥 DB Error during rescue: {e}")
+
+        print(f"\n✅ Saved: {inserted}/{len(opps)} new opportunities to Supabase")
+        print(f"📊 DB Stats: {db.get_stats()}")
+        sys.exit(0 if inserted > 0 or len(opps) == 0 else 1)
