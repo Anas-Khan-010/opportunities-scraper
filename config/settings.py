@@ -16,9 +16,18 @@ class Config:
     MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     
-    # Grants.gov endpoints
+    # SAM.gov Configuration
+    SAM_GOV_API_KEY = os.getenv('SAM_GOV_API_KEY')
+    SAM_GOV_BASE_URL = os.getenv('SAM_GOV_BASE_URL', 'https://sam.gov')
+    SAM_GOV_API_URL = os.getenv('SAM_GOV_API_URL', 'https://api.sam.gov/prod/opportunities/v2/search')
+    SAM_GOV_OPP_DELAY = float(os.getenv('SAM_GOV_OPP_DELAY', '10.0'))
+    SAM_GOV_PAGE_DELAY = float(os.getenv('SAM_GOV_PAGE_DELAY', '60.0'))
+    
+    # Grants.gov Configuration
     GRANTS_GOV_BASE_URL = os.getenv('GRANTS_GOV_BASE_URL', 'https://www.grants.gov')
     GRANTS_GOV_API_URL = os.getenv('GRANTS_GOV_API_URL', 'https://api.grants.gov/v1/api/search2')
+    GRANTS_GOV_DETAIL_PAGE_TIMEOUT = int(os.getenv('GRANTS_GOV_DETAIL_PAGE_TIMEOUT', '15'))
+    GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT = int(os.getenv('GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT', '3'))
     
     # User Agents
     USER_AGENTS = [
