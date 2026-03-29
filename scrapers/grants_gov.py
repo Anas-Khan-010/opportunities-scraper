@@ -56,11 +56,6 @@ class GrantsGovScraper(BaseScraper):
         ]
     }
 
-    # How long to wait for a detail page to render (seconds)
-    DETAIL_PAGE_TIMEOUT = 15
-    # Extra time after initial load for JS to finish rendering
-    DETAIL_PAGE_RENDER_WAIT = 3
-
     def __init__(self):
         super().__init__('Grants.gov')
         self.base_url = config.GRANTS_GOV_BASE_URL
@@ -334,7 +329,7 @@ class GrantsGovScraper(BaseScraper):
 
             # Wait for main content to render
             try:
-                WebDriverWait(self._driver, self.DETAIL_PAGE_TIMEOUT).until(
+                WebDriverWait(self._driver, config.GRANTS_GOV_DETAIL_PAGE_TIMEOUT).until(
                     EC.presence_of_element_located(
                         (By.CSS_SELECTOR, 'td, .usa-layout-docs__main, h1')
                     )
@@ -344,7 +339,7 @@ class GrantsGovScraper(BaseScraper):
                 return None
 
             # Give JS a bit more time to finish rendering
-            time.sleep(self.DETAIL_PAGE_RENDER_WAIT)
+            time.sleep(config.GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT)
 
             # Extract the full body text using BeautifulSoup to preserve <br> as newlines
             try:
