@@ -64,6 +64,15 @@ def test_scrapers():
         scrapers_failed += 1
     
     try:
+        from scrapers.federal_agencies import DOEScienceScraper
+        DOEScienceScraper()
+        logger.info("✅ DOEScienceScraper")
+        scrapers_tested += 1
+    except Exception as e:
+        logger.error(f"❌ DOEScienceScraper: {e}")
+        scrapers_failed += 1
+    
+    try:
         from scrapers.federal_agencies import USDAGrantsScraper
         USDAGrantsScraper()
         logger.info("✅ USDAGrantsScraper")

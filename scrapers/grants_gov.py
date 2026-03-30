@@ -139,6 +139,7 @@ class GrantsGovScraper(BaseScraper):
             logger.info("✅ Chrome driver initialized")
 
         seen_ids = set()  # Track IDs across keywords to avoid duplicate processing
+        keyword_results = {}
 
         try:
             for keyword in keywords:

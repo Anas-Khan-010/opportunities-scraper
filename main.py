@@ -25,6 +25,7 @@ from scrapers.foundation_scrapers import (
 )
 from scrapers.federal_agencies import (
     DOEScraper,
+    DOEScienceScraper,
     USDAGrantsScraper,
     EPAGrantsScraper,
     HUDGrantsScraper,
@@ -67,8 +68,9 @@ class ScraperOrchestrator:
         self.scrapers.append(NIHGrantsScraper())
         self.scrapers.append(NSFGrantsScraper())
         
-        # Federal agencies
+        # Federal agencies (API-based, via Grants.gov search2)
         self.scrapers.append(DOEScraper())
+        self.scrapers.append(DOEScienceScraper())
         self.scrapers.append(USDAGrantsScraper())
         self.scrapers.append(EPAGrantsScraper())
         self.scrapers.append(HUDGrantsScraper())
