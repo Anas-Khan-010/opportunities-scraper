@@ -52,62 +52,6 @@ def test_scrapers():
         logger.error(f"❌ NSFGrantsScraper: {e}")
         scrapers_failed += 1
     
-    # Test Federal Agencies
-    logger.info("\n=== Testing Federal Agency Scrapers ===")
-    try:
-        from scrapers.federal_agencies import DOEScraper
-        DOEScraper()
-        logger.info("✅ DOEScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ DOEScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.federal_agencies import DOEScienceScraper
-        DOEScienceScraper()
-        logger.info("✅ DOEScienceScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ DOEScienceScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.federal_agencies import USDAGrantsScraper
-        USDAGrantsScraper()
-        logger.info("✅ USDAGrantsScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ USDAGrantsScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.federal_agencies import EPAGrantsScraper
-        EPAGrantsScraper()
-        logger.info("✅ EPAGrantsScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ EPAGrantsScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.federal_agencies import HUDGrantsScraper
-        HUDGrantsScraper()
-        logger.info("✅ HUDGrantsScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ HUDGrantsScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.federal_agencies import SBAGrantsScraper
-        SBAGrantsScraper()
-        logger.info("✅ SBAGrantsScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ SBAGrantsScraper: {e}")
-        scrapers_failed += 1
-    
     # Test Foundation Scrapers
     logger.info("\n=== Testing Foundation Scrapers ===")
     try:

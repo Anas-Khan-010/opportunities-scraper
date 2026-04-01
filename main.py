@@ -23,14 +23,6 @@ from scrapers.foundation_scrapers import (
     KelloggFoundationScraper,
     MacArthurFoundationScraper
 )
-from scrapers.federal_agencies import (
-    DOEScraper,
-    DOEScienceScraper,
-    USDAGrantsScraper,
-    EPAGrantsScraper,
-    HUDGrantsScraper,
-    SBAGrantsScraper
-)
 from scrapers.state_scrapers import (
     CaliforniaScraper,
     TexasScraper,
@@ -67,14 +59,6 @@ class ScraperOrchestrator:
         # Research grants
         self.scrapers.append(NIHGrantsScraper())
         self.scrapers.append(NSFGrantsScraper())
-        
-        # Federal agencies (API-based, via Grants.gov search2)
-        self.scrapers.append(DOEScraper())
-        self.scrapers.append(DOEScienceScraper())
-        self.scrapers.append(USDAGrantsScraper())
-        self.scrapers.append(EPAGrantsScraper())
-        self.scrapers.append(HUDGrantsScraper())
-        self.scrapers.append(SBAGrantsScraper())
         
         # Foundation grants
         self.scrapers.append(GrantWatchScraper())
