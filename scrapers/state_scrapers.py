@@ -1,486 +1,785 @@
+"""
+Shared infrastructure for state-level scrapers.
+
+Classes:
+  _SeleniumDriverManager - singleton headless Chrome manager
+  StateAPIScraper        - JSON API scraper (e.g., CKAN)
+  StateHTMLScraper       - static HTML scraper (requests + BeautifulSoup)
+  StateSeleniumScraper   - JS-rendered portal scraper (Selenium)
+
+Functions:
+  create_state_scrapers(configs) - factory to build scraper instances from config list
+  cleanup_state_scrapers()       - close shared Selenium driver
+"""
+
+import subprocess
+import time
+import random
+import re
+import urllib.parse
 from scrapers.base_scraper import BaseScraper
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
 
-class CaliforniaScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('California Grants')
-        self.base_url = 'https://grants.ca.gov'
-    
-    def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
+SELENIUM_DELAY_RANGE = (4, 9)
+
+# When fallback_procurement_only is set on a config, only keep links whose text
+# looks like a solicitation (stops MS/MI-style portals from harvesting nav noise).
+_PROCUREMENT_TITLE_RE = re.compile(
+    r'(?:^|\s)(?:BID\s*:|RFQ|RFP|IFB|ITB|RFI|RFX|ITN|SOLICITATION|'
+    r'INVITATION\s+TO\s+BID|REQUEST\s+FOR\s+(?:PROPOSAL|QUOTATION|QUALIFICATIONS))',
+    re.I,
+)
+_MS_STYLE_BIDNUM = re.compile(
+    r'\b\d{3,4}-\d{2}-[A-Z]+-[A-Z]+-\d+\b',
+)
+
+
+def _detect_chrome_major_version():
+    """Best-effort major Chrome/Chromium version for undetected_chromedriver."""
+    for cmd in (
+        ['google-chrome', '--version'],
+        ['google-chrome-stable', '--version'],
+        ['chromium', '--version'],
+        ['chromium-browser', '--version'],
+    ):
         try:
-            response = self.fetch_page(f'{self.base_url}/grants/')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for row in soup.select('table.grants-table tr')[1:20]:
-                opp = self.parse_opportunity(row)
-                if opp:
-                    self.opportunities.append(opp)
+            out = subprocess.check_output(
+                cmd, stderr=subprocess.STDOUT, text=True, timeout=10
+            )
+            m = re.search(r'(\d+)\.', out)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            continue
+    return None
+
+
+def _title_looks_like_procurement(title: str) -> bool:
+    if not title or len(title) < 8:
+        return False
+    if _PROCUREMENT_TITLE_RE.search(title):
+        return True
+    if _MS_STYLE_BIDNUM.search(title):
+        return True
+    return False
+
+
+class _SeleniumDriverManager:
+    """Manages a single shared headless Chrome instance across all state scrapers."""
+
+    _driver = None
+
+    @classmethod
+    def get_driver(cls):
+        if cls._driver is not None:
+            try:
+                cls._driver.title
+                return cls._driver
+            except Exception:
+                logger.warning("Shared Selenium driver is dead, restarting...")
+                cls._driver = None
+        try:
+            import undetected_chromedriver as uc
+
+            options = uc.ChromeOptions()
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--window-size=1920,1080')
+            options.add_argument('--log-level=3')
+            options.add_argument('--dns-prefetch-disable')
+            options.add_argument(
+                'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0.0.0 Safari/537.36'
+            )
+            # Note: excludeSwitches breaks uc.ChromeOptions parsing in some Chrome builds
+
+            version_main = _detect_chrome_major_version()
+            if version_main:
+                logger.debug(f"undetected-chromedriver version_main={version_main}")
+
+            # headless=True via kwarg (do not pass --headless; UC patches it)
+            cls._driver = uc.Chrome(
+                options=options,
+                headless=True,
+                use_subprocess=True,
+                version_main=version_main,
+            )
+            cls._driver.set_page_load_timeout(30)
+            logger.info("Shared Selenium driver initialized (undetected-chromedriver)")
+            return cls._driver
         except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            cells = element.find_all('td')
-            if len(cells) < 2:
-                return None
-            title = clean_text(cells[0].text)
-            link = cells[0].find('a')
-            url = f"{self.base_url}{link['href']}" if link and link.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of California',
-                'description': clean_text(cells[1].text) if len(cells) > 1 else None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': parse_date(cells[2].text) if len(cells) > 2 else None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'California',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
+            logger.error(f"Failed to init shared Selenium driver: {e}")
             return None
 
-class TexasScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('Texas Grants')
-        self.base_url = 'https://comptroller.texas.gov'
-    
-    def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
-        try:
-            response = self.fetch_page(f'{self.base_url}/programs/')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.program-item, .grant-listing')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            title_elem = element.find(['h3', 'h4', 'a'])
-            if not title_elem:
-                return None
-            title = clean_text(title_elem.text)
-            link = element.find('a')
-            url = f"{self.base_url}{link['href']}" if link and link.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of Texas',
-                'description': clean_text(element.find('p').text) if element.find('p') else None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'Texas',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
+    @classmethod
+    def quit(cls):
+        if cls._driver is not None:
+            try:
+                cls._driver.quit()
+                logger.info("Shared Selenium driver closed")
+            except Exception as e:
+                logger.warning(f"Error closing shared Selenium driver: {e}")
+            finally:
+                cls._driver = None
 
-class FloridaScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('Florida Grants')
-        self.base_url = 'https://www.myfloridacfo.com'
-    
-    def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
-        try:
-            response = self.fetch_page(f'{self.base_url}/division/aa/grants/')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.grant-item, .content-item')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            title_elem = element.find(['h3', 'h4', 'a'])
-            if not title_elem:
-                return None
-            title = clean_text(title_elem.text)
-            link = element.find('a')
-            url = f"{self.base_url}{link['href']}" if link and link.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of Florida',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'Florida',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
 
-class NewYorkScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('New York Grants')
-        self.base_url = 'https://grantsgateway.ny.gov'
-    
-    def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
-        try:
-            response = self.fetch_page(f'{self.base_url}/IntelliGrants_NYSGG/module/nysgg/goportal.aspx')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.grant-row, tr.data-row')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            title_elem = element.find(['a', 'td'])
-            if not title_elem:
-                return None
-            title = clean_text(title_elem.text)
-            link = element.find('a')
-            url = link['href'] if link and link.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of New York',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'New York',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
+# ---------------------------------------------------------------------------
+# StateAPIScraper — JSON API (California CKAN, etc.)
+# ---------------------------------------------------------------------------
 
-class PennsylvaniaScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('Pennsylvania Grants')
-        self.base_url = 'https://www.grants.pa.gov'
-    
-    def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
-        try:
-            response = self.fetch_page(f'{self.base_url}/Search.aspx')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.grant-listing, .search-result')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            title_elem = element.find(['h3', 'a'])
-            if not title_elem:
-                return None
-            title = clean_text(title_elem.text)
-            link = element.find('a')
-            url = f"{self.base_url}{link['href']}" if link and link.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'Commonwealth of Pennsylvania',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'Pennsylvania',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
+class StateAPIScraper(BaseScraper):
+    """Scraper for states that expose data via a public JSON API."""
 
-class IllinoisScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('Illinois Grants')
-        self.base_url = 'https://www2.illinois.gov'
-    
-    def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
-        try:
-            response = self.fetch_page(f'{self.base_url}/sites/GATA/Grants/SitePages/AvailableGrants.aspx')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.grant-item, .ms-listlink')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            title_elem = element.find('a')
-            if not title_elem:
-                return None
-            title = clean_text(title_elem.text)
-            url = title_elem['href'] if title_elem.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of Illinois',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'Illinois',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
+    def __init__(self, config):
+        super().__init__(config['source_name'])
+        self.config = config
+        self.state_name = config['name']
+        self.organization = config['organization']
+        self.location = config['location']
+        self.opportunity_type = config.get('opportunity_type', 'grant')
 
-class OhioScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('Ohio Grants')
-        self.base_url = 'https://development.ohio.gov'
-    
     def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
-        try:
-            response = self.fetch_page(f'{self.base_url}/bs/bs_grantslist.htm')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.grant-listing, li a')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
+        logger.info(f"Starting {self.source_name} scraper (API)...")
+
+        api_type = self.config.get('api_type', 'ckan')
+        if api_type == 'ckan':
+            self._scrape_ckan()
+        else:
+            logger.error(f"Unknown API type: {api_type}")
+
         self.log_summary()
         return self.opportunities
-    
-    def parse_opportunity(self, element):
+
+    def _scrape_ckan(self):
+        api_url = self.config['api_url']
+        resource_id = self.config['resource_id']
+        page_size = self.config.get('page_size', 100)
+        offset = 0
+
+        count_sql = (
+            f'SELECT COUNT(*) FROM "{resource_id}" WHERE "Status" = \'active\''
+        )
+        total = None
         try:
-            if element.name == 'a':
-                title = clean_text(element.text)
-                url = f"{self.base_url}{element['href']}" if element.get('href') else self.base_url
+            resp = self.fetch_page(api_url, params={'sql': count_sql})
+            if resp:
+                total = resp.json()['result']['records'][0]['count']
+                logger.info(f"{self.state_name}: {total} active records in API")
+        except Exception:
+            pass
+
+        while True:
+            sql = (
+                f'SELECT * FROM "{resource_id}" '
+                f"WHERE \"Status\" = 'active' "
+                f'ORDER BY "_id" ASC '
+                f'LIMIT {page_size} OFFSET {offset}'
+            )
+            try:
+                response = self.fetch_page(api_url, params={'sql': sql})
+                if not response:
+                    break
+
+                data = response.json()
+                if not data.get('success'):
+                    logger.error(f"CKAN API error: {data}")
+                    break
+
+                records = data['result'].get('records', [])
+                if not records:
+                    break
+
+                for record in records:
+                    opp = self.parse_opportunity(record)
+                    if opp:
+                        self.opportunities.append(opp)
+
+                logger.info(
+                    f"  Fetched offset {offset}-{offset + len(records)}, "
+                    f"running total: {len(self.opportunities)}"
+                )
+                offset += page_size
+
+                if total and offset >= total:
+                    break
+
+            except Exception as e:
+                logger.error(f"Error at offset {offset}: {e}")
+                break
+
+    def parse_opportunity(self, record):
+        try:
+            title = clean_text(record.get('Title', ''))
+            if not title:
+                return None
+
+            grant_url = (record.get('GrantURL') or '').strip()
+            portal_id = record.get('PortalID', '')
+
+            if grant_url:
+                source_url = grant_url
+            elif portal_id:
+                source_url = f"https://grants.ca.gov/?portal_id={portal_id}"
             else:
-                title_elem = element.find('a')
-                if not title_elem:
-                    return None
-                title = clean_text(title_elem.text)
-                url = f"{self.base_url}{title_elem['href']}" if title_elem.get('href') else self.base_url
+                return None
+
+            deadline_raw = record.get('ApplicationDeadline', '')
+            deadline = None
+            if deadline_raw:
+                lowered = deadline_raw.strip().lower()
+                if lowered not in ('ongoing', 'continuous', 'n/a', 'tbd', ''):
+                    deadline = parse_date(deadline_raw)
+
+            description = clean_text(record.get('Description', ''))
+            if not description:
+                description = clean_text(record.get('Purpose', ''))
+
+            eligibility_parts = filter(None, [
+                record.get('ApplicantType'),
+                record.get('ApplicantTypeNotes'),
+            ])
+            eligibility = clean_text('; '.join(eligibility_parts)) or None
+
+            category = clean_text(record.get('Categories', ''))
+            if not category:
+                category = categorize_opportunity(title, description or '')
+
+            geography = clean_text(record.get('Geography', ''))
+            location = (
+                f"{self.location} - {geography}" if geography else self.location
+            )
+
             return {
                 'title': title,
-                'organization': 'State of Ohio',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'Ohio',
+                'organization': clean_text(record.get('AgencyDept', ''))
+                    or self.organization,
+                'description': description,
+                'eligibility': eligibility,
+                'funding_amount': clean_text(record.get('EstAvailFunds', '')),
+                'deadline': deadline,
+                'category': category,
+                'location': location,
                 'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
+                'source_url': source_url,
+                'opportunity_number': portal_id or None,
+                'posted_date': parse_date(record.get('OpenDate', '')),
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': self.opportunity_type,
             }
-        except:
+        except Exception as e:
+            logger.error(f"Error parsing {self.state_name} API record: {e}")
             return None
 
-class GeorgiaScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('Georgia Grants')
-        self.base_url = 'https://www.dca.ga.gov'
-    
+
+# ---------------------------------------------------------------------------
+# StateHTMLScraper — Static HTML pages (requests + BeautifulSoup)
+# ---------------------------------------------------------------------------
+
+class StateHTMLScraper(BaseScraper):
+    """
+    Scraper for states with static, server-rendered HTML pages.
+
+    Supports parser modes: 'table', 'links', 'links_external'.
+    """
+
+    def __init__(self, config):
+        super().__init__(config['source_name'])
+        self.config = config
+        self.state_name = config['name']
+        self.organization = config['organization']
+        self.location = config['location']
+        self.url = config['url']
+        self.opportunity_type = config.get('opportunity_type', 'grant')
+
     def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
+        logger.info(f"Starting {self.source_name} scraper (HTML)...")
         try:
-            response = self.fetch_page(f'{self.base_url}/safe-affordable-housing/funding')
+            response = self.fetch_page(self.url)
             if not response:
+                logger.warning(f"Failed to fetch {self.url}")
+                self.log_summary()
                 return self.opportunities
+
             soup = self.parse_html(response.content)
-            for item in soup.select('.funding-item, .content-block a')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            if element.name == 'a':
-                title = clean_text(element.text)
-                url = f"{self.base_url}{element['href']}" if element.get('href') else self.base_url
+            parser = self.config.get('parser', 'links')
+
+            if parser == 'table':
+                self._parse_table(soup)
+            elif parser in ('links', 'links_external'):
+                self._parse_links(soup, external_only=(parser == 'links_external'))
             else:
-                title_elem = element.find('a')
-                if not title_elem:
-                    return None
-                title = clean_text(title_elem.text)
-                url = f"{self.base_url}{title_elem['href']}" if title_elem.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of Georgia',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'Georgia',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
+                logger.error(f"Unknown parser type: {parser}")
 
-class NorthCarolinaScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('North Carolina Grants')
-        self.base_url = 'https://www.nccommerce.com'
-    
-    def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
-        try:
-            response = self.fetch_page(f'{self.base_url}/grants-incentives')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.grant-program, .program-link')[:15]:
-                opp = self.parse_opportunity(item)
-                if opp:
-                    self.opportunities.append(opp)
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
+
         self.log_summary()
         return self.opportunities
-    
-    def parse_opportunity(self, element):
-        try:
-            title_elem = element.find('a')
-            if not title_elem:
-                return None
-            title = clean_text(title_elem.text)
-            url = f"{self.base_url}{title_elem['href']}" if title_elem.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of North Carolina',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'North Carolina',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
 
-class MichiganScraper(BaseScraper):
-    def __init__(self):
-        super().__init__('Michigan Grants')
-        self.base_url = 'https://www.michigan.gov'
-    
+    def _parse_table(self, soup):
+        selector = self.config.get('table_selector', 'table')
+        tables = soup.select(selector)
+        if not tables:
+            logger.warning(f"{self.state_name}: no table found with '{selector}'")
+            return
+
+        table = tables[0]
+        rows = table.find_all('tr')
+        start = 1 if self.config.get('skip_header', True) else 0
+
+        col_cat = self.config.get('col_category')
+        col_title = self.config.get('col_title_link')
+        col_desc = self.config.get('col_description')
+
+        seen_urls = set()
+
+        for row in rows[start:]:
+            cells = row.find_all('td')
+            if not cells:
+                continue
+
+            try:
+                link_cell = cells[col_title] if col_title is not None and col_title < len(cells) else None
+                link_tag = link_cell.find('a') if link_cell else None
+                if not link_tag:
+                    continue
+
+                title = clean_text(link_tag.text)
+                href = link_tag.get('href', '').strip()
+                if not title or not href:
+                    continue
+
+                if not href.startswith('http'):
+                    href = urllib.parse.urljoin(self.url, href)
+
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+
+                category = None
+                if col_cat is not None and col_cat < len(cells):
+                    category = clean_text(cells[col_cat].text)
+
+                description = None
+                if col_desc is not None and col_desc < len(cells):
+                    description = clean_text(cells[col_desc].text)
+
+                if not category:
+                    category = categorize_opportunity(title, description or '')
+
+                self.opportunities.append({
+                    'title': title,
+                    'organization': self.organization,
+                    'description': description,
+                    'eligibility': None,
+                    'funding_amount': None,
+                    'deadline': None,
+                    'category': category,
+                    'location': self.location,
+                    'source': self.source_name,
+                    'source_url': href,
+                    'opportunity_number': None,
+                    'posted_date': None,
+                    'document_urls': [],
+                    'opportunity_type': self.opportunity_type,
+                })
+            except Exception as e:
+                logger.debug(f"Skipping row in {self.state_name}: {e}")
+                continue
+
+    def _parse_links(self, soup, external_only=False):
+        container_sel = self.config.get(
+            'container_selector', '.content-area, main, article'
+        )
+        containers = soup.select(container_sel)
+        if not containers:
+            containers = [soup.body] if soup.body else []
+
+        link_pattern = self.config.get('link_pattern', '')
+        base_domain = urllib.parse.urlparse(self.url).netloc.lower()
+        seen_urls = set()
+
+        for container in containers:
+            for link in container.find_all('a', href=True):
+                href = link['href'].strip()
+                title = clean_text(link.text)
+
+                if not title or len(title) < 8:
+                    continue
+                if not href or href.startswith(('#', 'javascript', 'mailto:', 'tel:')):
+                    continue
+
+                if not href.startswith('http'):
+                    href = urllib.parse.urljoin(self.url, href)
+
+                skip_extensions = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip')
+                if any(href.lower().endswith(ext) for ext in skip_extensions):
+                    continue
+
+                if external_only:
+                    link_domain = urllib.parse.urlparse(href).netloc.lower()
+                    if link_domain == base_domain:
+                        continue
+
+                if link_pattern and not any(
+                    p in href.lower() for p in link_pattern.split('|')
+                ):
+                    continue
+
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+
+                category = categorize_opportunity(title, '')
+
+                self.opportunities.append({
+                    'title': title,
+                    'organization': self.organization,
+                    'description': None,
+                    'eligibility': None,
+                    'funding_amount': None,
+                    'deadline': None,
+                    'category': category,
+                    'location': self.location,
+                    'source': self.source_name,
+                    'source_url': href,
+                    'opportunity_number': None,
+                    'posted_date': None,
+                    'document_urls': [],
+                    'opportunity_type': self.opportunity_type,
+                })
+
+    def parse_opportunity(self, element):
+        """Required by BaseScraper ABC."""
+        return None
+
+
+# ---------------------------------------------------------------------------
+# StateSeleniumScraper — JS-heavy portals (procurement, grants gateways)
+# ---------------------------------------------------------------------------
+
+class StateSeleniumScraper(BaseScraper):
+    """Scraper for portals that require JavaScript rendering via headless Chrome."""
+
+    def __init__(self, config):
+        super().__init__(config['source_name'])
+        self.config = config
+        self.state_name = config['name']
+        self.organization = config['organization']
+        self.location = config['location']
+        self.portal_url = config['url']
+        self.wait_selector = config.get(
+            'wait_selector', 'table, .search-results, main'
+        )
+        self.item_selector = config.get(
+            'item_selector', 'table tbody tr, .result-item'
+        )
+        self.title_selector = config.get('title_selector', 'td a, a')
+        self.opportunity_type = config.get('opportunity_type', 'grant')
+        self.fallback_procurement_only = config.get(
+            'fallback_procurement_only', False
+        )
+        self.max_parse_items = int(config.get('max_parse_items', 400))
+
     def scrape(self):
-        logger.info(f"Starting {self.source_name} scraper...")
+        logger.info(f"Starting {self.source_name} scraper (Selenium)...")
+
+        driver = _SeleniumDriverManager.get_driver()
+        if driver is None:
+            logger.error(
+                f"Selenium driver unavailable - skipping {self.state_name}"
+            )
+            self.log_summary()
+            return self.opportunities
+
         try:
-            response = self.fetch_page(f'{self.base_url}/budget/resources/grants')
-            if not response:
-                return self.opportunities
-            soup = self.parse_html(response.content)
-            for item in soup.select('.grant-listing, .content-link')[:15]:
-                opp = self.parse_opportunity(item)
+            self._scrape_with_driver(driver)
+        except Exception as e:
+            logger.error(f"Error scraping {self.state_name}: {e}")
+
+        self.log_summary()
+        return self.opportunities
+
+    def _scrape_with_driver(self, driver):
+        """Navigate and extract. Returns False if driver.get failed, True otherwise."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.common.exceptions import TimeoutException, WebDriverException
+
+        delay = random.uniform(*SELENIUM_DELAY_RANGE)
+        logger.info(f"{self.state_name}: waiting {delay:.0f}s before request...")
+        time.sleep(delay)
+
+        try:
+            driver.set_page_load_timeout(30)
+            driver.get(self.portal_url)
+        except WebDriverException as e:
+            logger.error(f"{self.state_name}: page load failed - {e}")
+            return False
+
+        try:
+            wait_selectors = [s.strip() for s in self.wait_selector.split(',')]
+            css = ', '.join(wait_selectors)
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, css))
+            )
+        except TimeoutException:
+            logger.warning(
+                f"{self.state_name}: timed out waiting for content at {self.portal_url}"
+            )
+
+        time.sleep(random.uniform(2, 4))
+
+        soup = self.parse_html(driver.page_source)
+        self._extract_opportunities(soup)
+        return True
+
+    def _extract_opportunities(self, soup):
+        item_selectors = [s.strip() for s in self.item_selector.split(',')]
+        items = []
+        for sel in item_selectors:
+            items = soup.select(sel)
+            if items:
+                break
+
+        if items:
+            self._parse_items(items, soup)
+
+        if not self.opportunities:
+            logger.info(
+                f"{self.state_name}: structured selectors found nothing, "
+                f"trying link-extraction fallback..."
+            )
+            self._extract_links_fallback(soup)
+
+        if not self.opportunities:
+            logger.warning(
+                f"{self.state_name}: no opportunities found at {self.portal_url}"
+            )
+
+    def _parse_items(self, items, soup):
+        """Extract opportunities from structured items (table rows, cards, etc.)."""
+        seen_urls = set()
+        title_selectors = [s.strip() for s in self.title_selector.split(',')]
+        if len(items) > self.max_parse_items:
+            logger.info(
+                f"{self.state_name}: limiting parse to {self.max_parse_items} "
+                f"of {len(items)} matched items"
+            )
+            items = items[: self.max_parse_items]
+
+        for item in items:
+            try:
+                link = None
+                for sel in title_selectors:
+                    found = item.select_one(sel)
+                    if found and found.name == 'a' and found.get('href'):
+                        link = found
+                        break
+
+                if not link:
+                    all_links = item.find_all('a', href=True)
+                    for a in all_links:
+                        text = clean_text(a.text)
+                        h = (a.get('href') or '').strip()
+                        if text and len(text) >= 3 and h and h != '#':
+                            link = a
+                            break
+
+                if not link:
+                    continue
+
+                title = clean_text(link.text)
+                href = (link.get('href') or '').strip()
+
+                if not title or len(title) < 3:
+                    continue
+                if not href or href == '#' or href.startswith('javascript'):
+                    continue
+
+                if not href.startswith('http'):
+                    href = urllib.parse.urljoin(self.portal_url, href)
+
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+
+                opp = self._build_opportunity(item, title, href)
                 if opp:
                     self.opportunities.append(opp)
-        except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
-        self.log_summary()
-        return self.opportunities
-    
+
+            except Exception as e:
+                logger.debug(f"Skipping item in {self.state_name}: {e}")
+                continue
+
+    _FALLBACK_MAX_LINKS = 200
+
+    @staticmethod
+    def _collect_doc_urls(container, base_url):
+        """Find PDF/doc/spreadsheet links near an opportunity item."""
+        doc_ext = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.ppt', '.pptx')
+        doc_urls = []
+        for a in container.find_all('a', href=True):
+            h = a['href'].strip()
+            if any(h.lower().endswith(ext) for ext in doc_ext):
+                if not h.startswith('http'):
+                    h = urllib.parse.urljoin(base_url, h)
+                if h not in doc_urls:
+                    doc_urls.append(h)
+        return doc_urls
+
+    def _extract_links_fallback(self, soup):
+        """Fallback: extract all meaningful links from the page's main content."""
+        containers = soup.select(
+            'main, article, section, [role="main"], .content-area, .content, '
+            '#content, .main-content, .page-content, .field-items, '
+            '.entry-content, .site-content, .post-content, .page-wrapper, '
+            '#main-content, #mainContent, .site-main'
+        )
+        if not containers:
+            containers = [soup.body] if soup.body else []
+
+        seen_urls = set()
+        skip_ext = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.css', '.js')
+        doc_ext = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip')
+        nav_words = (
+            'home', 'contact us', 'about us', 'login', 'sign in', 'register',
+            'back to top', 'privacy policy', 'terms of', 'sitemap', 'menu',
+            'skip to', 'accessibility', 'cookie', 'subscribe', 'follow us',
+            'facebook', 'twitter', 'linkedin', 'instagram', 'youtube',
+            'log in', 'sign up', 'forgot password',
+        )
+
+        page_doc_urls = self._collect_doc_urls(soup, self.portal_url)
+
+        for container in containers:
+            if len(seen_urls) >= self._FALLBACK_MAX_LINKS:
+                break
+            for link in container.find_all('a', href=True):
+                if len(seen_urls) >= self._FALLBACK_MAX_LINKS:
+                    break
+                href = link['href'].strip()
+                title = clean_text(link.text)
+
+                if not title or len(title) < 6:
+                    continue
+                if not href or href.startswith(('#', 'javascript', 'mailto:', 'tel:')):
+                    continue
+                if not href.startswith('http'):
+                    href = urllib.parse.urljoin(self.portal_url, href)
+                if any(href.lower().endswith(ext) for ext in skip_ext):
+                    continue
+                if any(href.lower().endswith(ext) for ext in doc_ext):
+                    continue
+
+                lower_title = title.lower()
+                if any(w in lower_title for w in nav_words):
+                    continue
+
+                if self.fallback_procurement_only and not _title_looks_like_procurement(
+                    title
+                ):
+                    continue
+
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+
+                parent = link.parent
+                local_docs = self._collect_doc_urls(parent, self.portal_url) if parent else []
+
+                category = categorize_opportunity(title, '')
+                self.opportunities.append({
+                    'title': title,
+                    'organization': self.organization,
+                    'description': None,
+                    'eligibility': None,
+                    'funding_amount': None,
+                    'deadline': None,
+                    'category': category,
+                    'location': self.location,
+                    'source': self.source_name,
+                    'source_url': href,
+                    'opportunity_number': None,
+                    'posted_date': None,
+                    'document_urls': local_docs or page_doc_urls[:5],
+                    'opportunity_type': self.opportunity_type,
+                })
+
+    def _build_opportunity(self, item, title, source_url):
+        description = None
+        deadline = None
+        cells = item.find_all('td')
+
+        if len(cells) >= 3:
+            for cell in cells[1:]:
+                text = clean_text(cell.text)
+                if not text:
+                    continue
+                if not description and len(text) > 20:
+                    description = text
+                if not deadline:
+                    parsed = parse_date(text)
+                    if parsed:
+                        deadline = parsed
+
+        doc_urls = self._collect_doc_urls(item, self.portal_url)
+        category = categorize_opportunity(title, description or '')
+
+        return {
+            'title': title,
+            'organization': self.organization,
+            'description': description,
+            'eligibility': None,
+            'funding_amount': None,
+            'deadline': deadline,
+            'category': category,
+            'location': self.location,
+            'source': self.source_name,
+            'source_url': source_url,
+            'opportunity_number': None,
+            'posted_date': None,
+            'document_urls': doc_urls,
+            'opportunity_type': self.opportunity_type,
+        }
+
     def parse_opportunity(self, element):
+        """Required by BaseScraper ABC."""
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Factory + Cleanup
+# ---------------------------------------------------------------------------
+
+def create_state_scrapers(configs):
+    """
+    Create scraper instances from a list of config dicts.
+
+    Each config must have at minimum: name, source_name, organization,
+    location, method ('api'|'html'|'selenium'), and method-specific fields.
+    """
+    scrapers = []
+    for cfg in configs:
+        method = cfg.get('method', 'selenium')
         try:
-            title_elem = element.find('a')
-            if not title_elem:
-                return None
-            title = clean_text(title_elem.text)
-            url = f"{self.base_url}{title_elem['href']}" if title_elem.get('href') else self.base_url
-            return {
-                'title': title,
-                'organization': 'State of Michigan',
-                'description': None,
-                'eligibility': None,
-                'funding_amount': None,
-                'deadline': None,
-                'category': categorize_opportunity(title, ''),
-                'location': 'Michigan',
-                'source': self.source_name,
-                'source_url': url,
-                'opportunity_number': None,
-                'posted_date': None,
-                'document_urls': [],
-                'full_document': None
-            }
-        except:
-            return None
+            if method == 'api':
+                scrapers.append(StateAPIScraper(cfg))
+            elif method == 'html':
+                scrapers.append(StateHTMLScraper(cfg))
+            elif method == 'selenium':
+                scrapers.append(StateSeleniumScraper(cfg))
+            else:
+                logger.warning(f"Unknown method '{method}' for {cfg.get('name')}")
+        except Exception as e:
+            logger.error(f"Failed to create scraper for {cfg.get('name')}: {e}")
+    return scrapers
+
+
+def cleanup_state_scrapers():
+    """Close the shared Selenium driver (call after all state scrapers finish)."""
+    _SeleniumDriverManager.quit()

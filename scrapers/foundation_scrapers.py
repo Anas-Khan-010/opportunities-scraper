@@ -94,7 +94,7 @@ class GrantWatchScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
             
             return opportunity
@@ -164,7 +164,7 @@ class NIHGrantsScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
             
             return opportunity
@@ -234,7 +234,7 @@ class NSFGrantsScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
             
             return opportunity
@@ -287,7 +287,7 @@ class GatesFoundationScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
         except:
             return None
@@ -336,7 +336,7 @@ class FordFoundationScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
         except:
             return None
@@ -385,7 +385,7 @@ class RWJFScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
         except:
             return None
@@ -434,7 +434,7 @@ class KelloggFoundationScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
         except:
             return None
@@ -483,7 +483,7 @@ class MacArthurFoundationScraper(BaseScraper):
                 'opportunity_number': None,
                 'posted_date': None,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'grant'
             }
         except:
             return None

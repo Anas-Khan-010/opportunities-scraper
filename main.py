@@ -23,18 +23,11 @@ from scrapers.foundation_scrapers import (
     KelloggFoundationScraper,
     MacArthurFoundationScraper
 )
-from scrapers.state_scrapers import (
-    CaliforniaScraper,
-    TexasScraper,
-    FloridaScraper,
-    NewYorkScraper,
-    PennsylvaniaScraper,
-    IllinoisScraper,
-    OhioScraper,
-    GeorgiaScraper,
-    NorthCarolinaScraper,
-    MichiganScraper
-)
+from scrapers.state_grant_scrapers import get_all_state_grant_scrapers
+from scrapers.state_rfp_scrapers import get_all_state_rfp_scrapers
+from scrapers.tgp_grant_scraper import get_tgp_grant_scrapers
+from scrapers.govcontracts_rfp_scraper import get_govcontracts_rfp_scrapers
+from scrapers.state_scrapers import cleanup_state_scrapers
 
 class ScraperOrchestrator:
     """Orchestrates all scrapers and manages data pipeline"""
@@ -52,15 +45,15 @@ class ScraperOrchestrator:
         """Register all available scrapers"""
         logger.info("Registering scrapers...")
         
-        # Federal sources (highest priority)
+        # ── Federal sources ────────────────────────────────────────────
         self.scrapers.append(GrantsGovScraper())
         self.scrapers.append(SAMGovScraper())
         
-        # Research grants
+        # ── Research grants ────────────────────────────────────────────
         self.scrapers.append(NIHGrantsScraper())
         self.scrapers.append(NSFGrantsScraper())
         
-        # Foundation grants
+        # ── Foundation grants ──────────────────────────────────────────
         self.scrapers.append(GrantWatchScraper())
         self.scrapers.append(GatesFoundationScraper())
         self.scrapers.append(FordFoundationScraper())
@@ -68,17 +61,17 @@ class ScraperOrchestrator:
         self.scrapers.append(KelloggFoundationScraper())
         self.scrapers.append(MacArthurFoundationScraper())
         
-        # Top 10 state sources
-        self.scrapers.append(CaliforniaScraper())
-        self.scrapers.append(TexasScraper())
-        self.scrapers.append(FloridaScraper())
-        self.scrapers.append(NewYorkScraper())
-        self.scrapers.append(PennsylvaniaScraper())
-        self.scrapers.append(IllinoisScraper())
-        self.scrapers.append(OhioScraper())
-        self.scrapers.append(GeorgiaScraper())
-        self.scrapers.append(NorthCarolinaScraper())
-        self.scrapers.append(MichiganScraper())
+        # ── State GRANTS: TGP (primary — all 50 states) ───────────────
+        self.scrapers.extend(get_tgp_grant_scrapers())
+
+        # ── State GRANTS: supplementary verified sources (CA, NC, VA…) ─
+        self.scrapers.extend(get_all_state_grant_scrapers())
+
+        # ── State RFPs: GovContracts.us (primary — all 50 states) ────
+        self.scrapers.extend(get_govcontracts_rfp_scrapers())
+
+        # ── State RFPs: supplementary Selenium scrapers ──────────────
+        self.scrapers.extend(get_all_state_rfp_scrapers())
         
         logger.info(f"Registered {len(self.scrapers)} scrapers")
     
@@ -194,6 +187,9 @@ def main():
         
         # Print summary
         orchestrator.print_summary()
+        
+        # Close shared Selenium driver used by state scrapers
+        cleanup_state_scrapers()
         
         logger.info("System shutdown complete")
         return 0

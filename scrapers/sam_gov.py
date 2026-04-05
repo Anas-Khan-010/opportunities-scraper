@@ -199,7 +199,7 @@ class SAMGovScraper(BaseScraper):
                 'organization': organization,
                 'description': description,
                 'eligibility': eligibility,
-                'funding_amount': None, # API generally omits this
+                'funding_amount': None,
                 'deadline': deadline,
                 'category': category or 'General',
                 'location': location,
@@ -208,7 +208,7 @@ class SAMGovScraper(BaseScraper):
                 'opportunity_number': opportunity_number,
                 'posted_date': posted_date,
                 'document_urls': [],
-                'full_document': None
+                'opportunity_type': 'contract',
             }
             
             return opportunity

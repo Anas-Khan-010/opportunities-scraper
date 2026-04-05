@@ -305,7 +305,7 @@ class GrantsGovScraper(BaseScraper):
                 'opportunity_number': opportunity_number,
                 'posted_date': posted_date,
                 'document_urls': [],
-                'full_document': None,
+                'opportunity_type': 'grant',
             }
 
         except Exception as e:

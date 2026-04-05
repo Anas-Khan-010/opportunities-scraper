@@ -32,9 +32,12 @@ CREATE TABLE IF NOT EXISTS opportunities (
     source_url TEXT UNIQUE NOT NULL,
     opportunity_number TEXT,
     
+    -- Type classification (grant, rfp, contract, etc.)
+    opportunity_type TEXT DEFAULT NULL,
+    
     -- Documents
     document_urls TEXT[],
-    full_document TEXT
+    full_document TEXT  -- deprecated: no longer populated by scrapers
 );
 
 -- Create indexes for better query performance
@@ -44,6 +47,7 @@ CREATE INDEX IF NOT EXISTS idx_category ON opportunities(category);
 CREATE INDEX IF NOT EXISTS idx_scraped_at ON opportunities(scraped_at);
 CREATE INDEX IF NOT EXISTS idx_posted_date ON opportunities(posted_date);
 CREATE INDEX IF NOT EXISTS idx_organization ON opportunities(organization);
+CREATE INDEX IF NOT EXISTS idx_opportunity_type ON opportunities(opportunity_type);
 
 -- Create full-text search index
 CREATE INDEX IF NOT EXISTS idx_title_search ON opportunities USING gin(to_tsvector('english', title));
@@ -61,7 +65,8 @@ SELECT
     location,
     source,
     source_url,
-    posted_date
+    posted_date,
+    opportunity_type
 FROM opportunities
 WHERE deadline > NOW() OR deadline IS NULL
 ORDER BY posted_date DESC;
@@ -76,6 +81,7 @@ SELECT
     deadline,
     category,
     source,
+    opportunity_type,
     scraped_at
 FROM opportunities
 ORDER BY scraped_at DESC
@@ -129,4 +135,5 @@ $$ LANGUAGE plpgsql;
 COMMENT ON TABLE opportunities IS 'Stores RFP and grant opportunities from various sources';
 COMMENT ON COLUMN opportunities.source_url IS 'Unique URL - prevents duplicates';
 COMMENT ON COLUMN opportunities.document_urls IS 'Array of PDF/document URLs';
-COMMENT ON COLUMN opportunities.full_document IS 'Extracted text from documents';
+COMMENT ON COLUMN opportunities.full_document IS 'Deprecated — no longer populated by scrapers';
+COMMENT ON COLUMN opportunities.opportunity_type IS 'Type: grant, rfp, contract';
