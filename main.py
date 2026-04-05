@@ -13,21 +13,19 @@ from parsers.parser_utils import OpportunityEnricher
 # Import federal scrapers
 from scrapers.grants_gov import GrantsGovScraper
 from scrapers.sam_gov import SAMGovScraper
-from scrapers.foundation_scrapers import (
-    GrantWatchScraper, 
-    NIHGrantsScraper, 
-    NSFGrantsScraper,
-    GatesFoundationScraper,
-    FordFoundationScraper,
-    RWJFScraper,
-    KelloggFoundationScraper,
-    MacArthurFoundationScraper
+from scrapers.foundation_scrapers import DukeResearchFundingScraper
+from scrapers.state_scrapers import (
+    CaliforniaScraper,
+    TexasScraper,
+    FloridaScraper,
+    NewYorkScraper,
+    PennsylvaniaScraper,
+    IllinoisScraper,
+    OhioScraper,
+    GeorgiaScraper,
+    NorthCarolinaScraper,
+    MichiganScraper
 )
-from scrapers.state_grant_scrapers import get_all_state_grant_scrapers
-from scrapers.state_rfp_scrapers import get_all_state_rfp_scrapers
-from scrapers.tgp_grant_scraper import get_tgp_grant_scrapers
-from scrapers.govcontracts_rfp_scraper import get_govcontracts_rfp_scrapers
-from scrapers.state_scrapers import cleanup_state_scrapers
 
 class ScraperOrchestrator:
     """Orchestrates all scrapers and manages data pipeline"""

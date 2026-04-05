@@ -29,6 +29,13 @@ class Config:
     GRANTS_GOV_DETAIL_PAGE_TIMEOUT = int(os.getenv('GRANTS_GOV_DETAIL_PAGE_TIMEOUT', '15'))
     GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT = int(os.getenv('GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT', '3'))
     
+    # Duke Research Funding Configuration
+    DUKE_BASE_URL = os.getenv('DUKE_BASE_URL', 'https://researchfunding.duke.edu')
+    DUKE_LISTING_URL = os.getenv(
+        'DUKE_LISTING_URL',
+        'https://researchfunding.duke.edu/search-results?open=1&sort_bef_combine=deadline_ASC'
+    )
+    
     # User Agents
     USER_AGENTS = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
