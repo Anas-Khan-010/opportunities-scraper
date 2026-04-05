@@ -47,6 +47,7 @@ class Database:
             source TEXT NOT NULL,
             source_url TEXT UNIQUE NOT NULL,
             opportunity_number TEXT,
+            opportunity_type TEXT DEFAULT NULL,
             posted_date TIMESTAMP,
             document_urls TEXT[],
             full_document TEXT,
@@ -58,6 +59,9 @@ class Database:
         CREATE INDEX IF NOT EXISTS idx_deadline ON opportunities(deadline);
         CREATE INDEX IF NOT EXISTS idx_category ON opportunities(category);
         CREATE INDEX IF NOT EXISTS idx_scraped_at ON opportunities(scraped_at);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_type ON opportunities(opportunity_type);
+        
+        ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS opportunity_type TEXT DEFAULT NULL;
         """
         
         try:
@@ -84,15 +88,19 @@ class Database:
     
     def insert_opportunity(self, data):
         """Insert new opportunity into database"""
+        data_copy = dict(data)
+        data_copy.setdefault('opportunity_type', None)
+        data_copy.setdefault('full_document', None)
+
         query = """
         INSERT INTO opportunities (
             title, organization, description, eligibility, funding_amount,
             deadline, category, location, source, source_url, opportunity_number,
-            posted_date, document_urls, full_document
+            posted_date, document_urls, full_document, opportunity_type
         ) VALUES (
             %(title)s, %(organization)s, %(description)s, %(eligibility)s, %(funding_amount)s,
             %(deadline)s, %(category)s, %(location)s, %(source)s, %(source_url)s, %(opportunity_number)s,
-            %(posted_date)s, %(document_urls)s, %(full_document)s
+            %(posted_date)s, %(document_urls)s, %(full_document)s, %(opportunity_type)s
         )
         ON CONFLICT (source_url) DO NOTHING
         RETURNING id
@@ -101,13 +109,13 @@ class Database:
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(query, data)
+                    cur.execute(query, data_copy)
                     result = cur.fetchone()
                     if result:
-                        logger.info(f"Inserted opportunity: {data['title']}")
+                        logger.info(f"Inserted opportunity: {data_copy['title']}")
                         return result[0]
                     else:
-                        logger.debug(f"Duplicate skipped: {data['title']}")
+                        logger.debug(f"Duplicate skipped: {data_copy['title']}")
                         return None
         except Exception as e:
             logger.error(f"Error inserting opportunity: {e}")

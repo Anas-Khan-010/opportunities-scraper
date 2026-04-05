@@ -82,7 +82,7 @@ def test_database_insert():
             'opportunity_number': 'TEST-001',
             'posted_date': None,
             'document_urls': [],
-            'full_document': None
+            'opportunity_type': 'grant'
         }
         
         result = db.insert_opportunity(test_opp)

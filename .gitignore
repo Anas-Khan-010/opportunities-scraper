@@ -19,6 +19,7 @@ logs/
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 
@@ -28,4 +29,12 @@ Thumbs.db
 
 # Downloaded documents
 downloads/
-*.pdf
+
+# Temp reports and test outputs
+scripts/*.txt
+scripts/*.json
+scripts/test_*.py
+scripts/debug_*.py
+scripts/phase1_*.py
+scripts/phase2_*.py
+scripts/phase4_*.py

@@ -43,24 +43,33 @@ class ScraperOrchestrator:
         """Register all available scrapers"""
         logger.info("Registering scrapers...")
         
-        # Federal sources (highest priority)
+        # ── Federal sources ────────────────────────────────────────────
         self.scrapers.append(GrantsGovScraper())
         self.scrapers.append(SAMGovScraper())
         
-        # Research grants
-        self.scrapers.append(DukeResearchFundingScraper())
+        # ── Research grants ────────────────────────────────────────────
+        self.scrapers.append(NIHGrantsScraper())
+        self.scrapers.append(NSFGrantsScraper())
         
-        # Top 10 state sources
-        self.scrapers.append(CaliforniaScraper())
-        self.scrapers.append(TexasScraper())
-        self.scrapers.append(FloridaScraper())
-        self.scrapers.append(NewYorkScraper())
-        self.scrapers.append(PennsylvaniaScraper())
-        self.scrapers.append(IllinoisScraper())
-        self.scrapers.append(OhioScraper())
-        self.scrapers.append(GeorgiaScraper())
-        self.scrapers.append(NorthCarolinaScraper())
-        self.scrapers.append(MichiganScraper())
+        # ── Foundation grants ──────────────────────────────────────────
+        self.scrapers.append(GrantWatchScraper())
+        self.scrapers.append(GatesFoundationScraper())
+        self.scrapers.append(FordFoundationScraper())
+        self.scrapers.append(RWJFScraper())
+        self.scrapers.append(KelloggFoundationScraper())
+        self.scrapers.append(MacArthurFoundationScraper())
+        
+        # ── State GRANTS: TGP (primary — all 50 states) ───────────────
+        self.scrapers.extend(get_tgp_grant_scrapers())
+
+        # ── State GRANTS: supplementary verified sources (CA, NC, VA…) ─
+        self.scrapers.extend(get_all_state_grant_scrapers())
+
+        # ── State RFPs: GovContracts.us (primary — all 50 states) ────
+        self.scrapers.extend(get_govcontracts_rfp_scrapers())
+
+        # ── State RFPs: supplementary Selenium scrapers ──────────────
+        self.scrapers.extend(get_all_state_rfp_scrapers())
         
         logger.info(f"Registered {len(self.scrapers)} scrapers")
     
@@ -176,6 +185,9 @@ def main():
         
         # Print summary
         orchestrator.print_summary()
+        
+        # Close shared Selenium driver used by state scrapers
+        cleanup_state_scrapers()
         
         logger.info("System shutdown complete")
         return 0
