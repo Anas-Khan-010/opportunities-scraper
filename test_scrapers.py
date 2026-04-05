@@ -34,78 +34,15 @@ def test_scrapers():
         logger.error(f"❌ SAMGovScraper: {e}")
         scrapers_failed += 1
     
-    try:
-        from scrapers.foundation_scrapers import NIHGrantsScraper
-        NIHGrantsScraper()
-        logger.info("✅ NIHGrantsScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ NIHGrantsScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.foundation_scrapers import NSFGrantsScraper
-        NSFGrantsScraper()
-        logger.info("✅ NSFGrantsScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ NSFGrantsScraper: {e}")
-        scrapers_failed += 1
-    
     # Test Foundation Scrapers
     logger.info("\n=== Testing Foundation Scrapers ===")
     try:
-        from scrapers.foundation_scrapers import GrantWatchScraper
-        GrantWatchScraper()
-        logger.info("✅ GrantWatchScraper")
+        from scrapers.foundation_scrapers import DukeResearchFundingScraper
+        DukeResearchFundingScraper()
+        logger.info("✅ DukeResearchFundingScraper")
         scrapers_tested += 1
     except Exception as e:
-        logger.error(f"❌ GrantWatchScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.foundation_scrapers import GatesFoundationScraper
-        GatesFoundationScraper()
-        logger.info("✅ GatesFoundationScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ GatesFoundationScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.foundation_scrapers import FordFoundationScraper
-        FordFoundationScraper()
-        logger.info("✅ FordFoundationScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ FordFoundationScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.foundation_scrapers import RWJFScraper
-        RWJFScraper()
-        logger.info("✅ RWJFScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ RWJFScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.foundation_scrapers import KelloggFoundationScraper
-        KelloggFoundationScraper()
-        logger.info("✅ KelloggFoundationScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ KelloggFoundationScraper: {e}")
-        scrapers_failed += 1
-    
-    try:
-        from scrapers.foundation_scrapers import MacArthurFoundationScraper
-        MacArthurFoundationScraper()
-        logger.info("✅ MacArthurFoundationScraper")
-        scrapers_tested += 1
-    except Exception as e:
-        logger.error(f"❌ MacArthurFoundationScraper: {e}")
+        logger.error(f"❌ DukeResearchFundingScraper: {e}")
         scrapers_failed += 1
     
     # Test State Scrapers

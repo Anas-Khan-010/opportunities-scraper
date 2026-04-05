@@ -13,16 +13,7 @@ from parsers.parser_utils import OpportunityEnricher
 # Import federal scrapers
 from scrapers.grants_gov import GrantsGovScraper
 from scrapers.sam_gov import SAMGovScraper
-from scrapers.foundation_scrapers import (
-    GrantWatchScraper, 
-    NIHGrantsScraper, 
-    NSFGrantsScraper,
-    GatesFoundationScraper,
-    FordFoundationScraper,
-    RWJFScraper,
-    KelloggFoundationScraper,
-    MacArthurFoundationScraper
-)
+from scrapers.foundation_scrapers import DukeResearchFundingScraper
 from scrapers.state_scrapers import (
     CaliforniaScraper,
     TexasScraper,
@@ -57,16 +48,7 @@ class ScraperOrchestrator:
         self.scrapers.append(SAMGovScraper())
         
         # Research grants
-        self.scrapers.append(NIHGrantsScraper())
-        self.scrapers.append(NSFGrantsScraper())
-        
-        # Foundation grants
-        self.scrapers.append(GrantWatchScraper())
-        self.scrapers.append(GatesFoundationScraper())
-        self.scrapers.append(FordFoundationScraper())
-        self.scrapers.append(RWJFScraper())
-        self.scrapers.append(KelloggFoundationScraper())
-        self.scrapers.append(MacArthurFoundationScraper())
+        self.scrapers.append(DukeResearchFundingScraper())
         
         # Top 10 state sources
         self.scrapers.append(CaliforniaScraper())
