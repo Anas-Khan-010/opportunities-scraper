@@ -1,4 +1,4 @@
-# Environment variables
+# Environment variables (contains DB creds and API keys)
 .env
 
 # Python
@@ -6,6 +6,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg-info/
+dist/
+build/
 .Python
 venv/
 .venv/
@@ -30,11 +33,10 @@ Thumbs.db
 # Downloaded documents
 downloads/
 
-# Temp reports and test outputs
+# Script outputs
 scripts/*.txt
 scripts/*.json
-scripts/test_*.py
-scripts/debug_*.py
-scripts/phase1_*.py
-scripts/phase2_*.py
-scripts/phase4_*.py
+
+# Selenium / Chrome
+chromedriver
+chromedriver.log

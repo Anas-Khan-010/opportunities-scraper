@@ -24,85 +24,94 @@ class SAMGovScraper(BaseScraper):
         self.api_key = config.SAM_GOV_API_KEY
     
     def scrape(self, max_pages=5):
-        """Scrape contract opportunities from SAM.gov"""
+        """Scrape contract opportunities from SAM.gov.
+
+        Enforces a hard cap of SAM_GOV_MAX_REQUESTS total API calls per run
+        (default 4) with SAM_GOV_OPP_DELAY seconds between each request
+        (default 1800 = 30 min) to stay safely within SAM.gov rate limits.
+        """
         logger.info(f"Starting {self.source_name} scraper...")
-        logger.info(f"\n🚀 Starting {self.source_name} scraper (API Only Mode)")
-        
+
         if not self.api_key:
             logger.warning("SAM.gov API key not configured. Get free key at https://sam.gov/data-services/")
             logger.warning("Add SAM_GOV_API_KEY to .env file to enable this scraper")
             return self.opportunities
-        
-        # SAM.gov v2 search requires postedFrom and postedTo (max 1 year apart)
-        # We will default to looking back 180 days from today to get fresh opps
+
+        max_requests = config.SAM_GOV_MAX_REQUESTS
+        request_delay = config.SAM_GOV_OPP_DELAY
+        requests_made = 0
+
         today = datetime.now()
         posted_to = today.strftime('%m/%d/%Y')
         posted_from = (today - timedelta(days=180)).strftime('%m/%d/%Y')
-        
-        logger.info(f"📅 Searching from {posted_from} to {posted_to}")
-        
-        # Track DB duplicates
+
+        logger.info(f"Searching from {posted_from} to {posted_to}")
+        logger.info(f"Hard limit: {max_requests} API requests per run, {request_delay}s gap between each")
+
         sequential_duplicates = 0
-        
+
         for page in range(max_pages):
+            if requests_made >= max_requests:
+                logger.info(f"Reached {max_requests}-request cap. Stopping SAM.gov scraper for this run.")
+                break
+
             try:
                 params = {
                     'api_key': self.api_key,
                     'limit': 50,
                     'offset': page * 50,
                     'postedFrom': posted_from,
-                    'postedTo': posted_to
+                    'postedTo': posted_to,
                 }
-                
+
                 response = self.fetch_page(self.api_url, params=params)
+                requests_made += 1
                 if not response:
-                    logger.warning(f"❌ Failed to fetch page {page + 1}")
+                    logger.warning(f"Failed to fetch page {page + 1}")
                     continue
-                
+
                 data = response.json()
-                
+
                 if 'opportunitiesData' not in data or not data['opportunitiesData']:
-                    logger.info(f"ℹ️ No more opportunities found on page {page + 1}")
+                    logger.info(f"No more opportunities found on page {page + 1}")
                     break
-                
+
                 opps_data = data['opportunitiesData']
-                logger.info(f"📄 Page {page + 1} returned {len(opps_data)} opportunities")
-                
+                logger.info(f"Page {page + 1} returned {len(opps_data)} opportunities (request {requests_made}/{max_requests})")
+
                 for opp in opps_data:
-                    # Construct UI link for deduplication check
                     ui_link = opp.get('uiLink')
                     if not ui_link:
                         ui_link = f"{self.base_url}/workspace/contract/opp/{opp.get('noticeId')}/view"
-                        
+
                     if db.opportunity_exists(ui_link):
                         sequential_duplicates += 1
-                        logger.info(f"  ⏭️  Skipped DB duplicate: {opp.get('title', '')[:50]}...")
                         if sequential_duplicates >= 20:
-                            logger.info(f"  🛑 Hit 20 duplicates in a row. Stopping scraper.")
+                            logger.info("Hit 20 duplicates in a row. Stopping scraper.")
+                            self.log_summary()
                             return self.opportunities
                         continue
-                        
+
                     sequential_duplicates = 0
-                    
+
                     opportunity = self.parse_opportunity(opp)
                     if opportunity:
-                        self.opportunities.append(opportunity)
-                        logger.info(f"  ✅ Extracted: {opportunity['title'][:60]}...")
-                        
-                    # HARD RATE LIMITING: SAM.gov API has extremely strict burst quotas.
-                    # Sleeping configuration set in .env between each opportunity to ensure we stay well below limits.
-                    logger.info(f"    ⏳ Anti-ban: Sleeping {config.SAM_GOV_OPP_DELAY}s before next request...")
-                    time.sleep(config.SAM_GOV_OPP_DELAY)
-                
-                # HARD RATE LIMITING: Sleep between major paginated search requests
-                if page < max_pages - 1:
-                    logger.info(f"🛑 MAJOR REST: Waiting {config.SAM_GOV_PAGE_DELAY} seconds to clear SAM API quota buckets completely...")
-                    time.sleep(config.SAM_GOV_PAGE_DELAY)
-                    
+                        self.add_opportunity(opportunity)
+                        logger.info(f"  Extracted: {opportunity['title'][:60]}...")
+
+                    if self.reached_limit() or requests_made >= max_requests:
+                        logger.info(f"Reached {max_requests}-request cap mid-page. Stopping.")
+                        break
+
+                if requests_made < max_requests and page < max_pages - 1:
+                    mins = int(request_delay // 60)
+                    logger.info(f"Waiting {mins} min ({request_delay}s) before next SAM.gov request...")
+                    time.sleep(request_delay)
+
             except Exception as e:
                 logger.error(f"Error scraping page {page + 1}: {e}")
                 continue
-        
+
         self.log_summary()
         return self.opportunities
     
@@ -179,11 +188,10 @@ class SAMGovScraper(BaseScraper):
             if eligibility == 'NONE' or eligibility == '':
                 eligibility = 'Unrestricted / No Set-Aside'
                 
-            # Description (Secondary API fetch)
-            desc_api_link = opp_data.get('description')
+            # Description — SAM.gov returns a secondary API URL for full text.
+            # Skipped to stay within the strict per-run request cap; the listing
+            # data (title, org, dates, eligibility) is sufficient.
             description = None
-            if desc_api_link and desc_api_link.startswith('http'):
-                description = self._fetch_description(desc_api_link)
                 
             # Auto-categorize if needed
             if category and category.lower() in ['solicitation', 'presolicitation', 'sources sought', 'award notice']:

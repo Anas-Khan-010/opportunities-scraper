@@ -11,7 +11,6 @@ Env vars (optional):
 """
 
 import html as html_mod
-import os
 import re
 import time
 import random
@@ -22,6 +21,7 @@ from scrapers.state_scrapers import (
     _SeleniumDriverManager,
     SELENIUM_DELAY_RANGE,
 )
+from config.settings import config
 from utils.logger import logger
 from utils.helpers import (
     clean_text,
@@ -46,11 +46,11 @@ TGP_STATE_IDS = {
     51: 'Wisconsin',     52: 'Wyoming',
 }
 
-BASE_URL = 'https://www.thegrantportal.com'
+BASE_URL = config.TGP_BASE_URL
 LOGIN_URL = f'{BASE_URL}/login'
 LISTING_TPL = f'{BASE_URL}/?states={{state_id}}&countries=1&filter=1&page={{page}}'
 
-MAX_PAGES_PER_STATE = 10
+MAX_PAGES_PER_STATE = config.TGP_MAX_PAGES_PER_STATE
 DELAY_BETWEEN_PAGES = (1.5, 3)
 DELAY_BETWEEN_STATES = (2, 5)
 
@@ -65,8 +65,8 @@ class TGPGrantScraper(BaseScraper):
 
     def __init__(self):
         super().__init__('The Grant Portal')
-        self.email = os.getenv('TGP_EMAIL', '')
-        self.password = os.getenv('TGP_PASSWORD', '')
+        self.email = config.TGP_EMAIL
+        self.password = config.TGP_PASSWORD
         self._logged_in = False
 
     def scrape(self):
@@ -83,6 +83,8 @@ class TGPGrantScraper(BaseScraper):
         for state_id, state_name in sorted(
             TGP_STATE_IDS.items(), key=lambda x: x[1]
         ):
+            if self.reached_limit():
+                break
             try:
                 self._scrape_state(driver, state_id, state_name)
             except Exception as exc:
@@ -204,7 +206,15 @@ class TGPGrantScraper(BaseScraper):
             if not new_grants:
                 break
 
-            self.opportunities.extend(new_grants)
+            for grant in new_grants:
+                self._enrich_from_detail(driver, grant)
+                self.add_opportunity(grant)
+                if self.reached_limit():
+                    break
+
+            if self.reached_limit():
+                break
+
             page += 1
 
             if not self._has_next_page_fast(driver.page_source):
@@ -217,6 +227,88 @@ class TGPGrantScraper(BaseScraper):
             logger.debug(f"TGP: {state_name} — 0 grants")
 
         time.sleep(random.uniform(*DELAY_BETWEEN_STATES))
+
+    # ------------------------------------------------------------------
+    # Detail page enrichment (eligibility + doc URLs)
+    # ------------------------------------------------------------------
+
+    def _enrich_from_detail(self, driver, grant):
+        """Visit the grant detail page and extract eligibility + document URLs."""
+        detail_url = grant.get('source_url', '')
+        if not detail_url or '/grant-details/' not in detail_url:
+            return
+
+        try:
+            time.sleep(random.uniform(1.5, 3.0))
+            driver.get(detail_url)
+            time.sleep(random.uniform(2, 4))
+            dhtml = driver.page_source or ''
+
+            elig = self._extract_eligibility_from_detail(dhtml)
+            if elig:
+                grant['eligibility'] = elig
+
+            docs = self._extract_doc_urls_from_detail(dhtml)
+            if docs:
+                grant['document_urls'] = docs
+
+            desc = self._extract_full_description(dhtml)
+            if desc and (not grant.get('description') or len(desc) > len(grant['description'])):
+                grant['description'] = desc
+
+        except Exception as exc:
+            logger.debug(f"TGP: detail enrichment failed for {detail_url}: {exc}")
+
+    @staticmethod
+    def _extract_eligibility_from_detail(html):
+        section = re.search(
+            r'Eligible\s+Requirements.*?</div>\s*</div>\s*</div>',
+            html, re.I | re.DOTALL,
+        )
+        if not section:
+            return None
+        labels = re.findall(
+            r'<label[^>]*>\s*<input[^>]*checked[^>]*>\s*(.*?)\s*</label>',
+            section.group(0), re.I | re.DOTALL,
+        )
+        if not labels:
+            labels = re.findall(
+                r'<label[^>]*>\s*<input[^>]*>\s*(.*?)\s*</label>',
+                section.group(0), re.I | re.DOTALL,
+            )
+        items = [clean_text(html_mod.unescape(re.sub(r'<[^>]+>', '', l))) for l in labels]
+        items = [i for i in items if i and len(i) > 2]
+        return '; '.join(items) if items else None
+
+    @staticmethod
+    def _extract_doc_urls_from_detail(html):
+        doc_pattern = re.compile(
+            r'href="([^"]+\.(?:pdf|doc|docx|xls|xlsx|csv|zip)(?:\?[^"]*)?)"',
+            re.I,
+        )
+        urls = []
+        for m in doc_pattern.finditer(html):
+            url = m.group(1)
+            if url not in urls and 'swal2' not in url and 'cookie' not in url:
+                full = urllib.parse.urljoin(BASE_URL, url)
+                urls.append(full)
+        return urls if urls else []
+
+    @staticmethod
+    def _extract_full_description(html):
+        m = re.search(
+            r'<div[^>]*class="[^"]*space-y-6[^"]*divide-y[^"]*"[^>]*>(.*?)(Eligible\s+Requirements|$)',
+            html, re.I | re.DOTALL,
+        )
+        if not m:
+            return None
+        raw = m.group(1)
+        raw = re.sub(r'<(script|style|svg)[^>]*>.*?</\1>', '', raw, flags=re.DOTALL | re.I)
+        text = clean_text(html_mod.unescape(re.sub(r'<[^>]+>', ' ', raw)))
+        text = re.sub(r'GrantID:\s*\d+', '', text)
+        text = re.sub(r'Grant Funding Amount.*?(?=\.|$)', '', text, flags=re.I)
+        text = clean_text(text)
+        return text[:1000] if text and len(text) > 30 else None
 
     # ------------------------------------------------------------------
     # Fast extraction using regex on raw HTML (avoids full BS4 parse of 800KB)
@@ -256,8 +348,8 @@ class TGPGrantScraper(BaseScraper):
             if grant_id in seen_ids:
                 continue
 
-            card_start = max(0, m.start() - 2000)
-            card_html = html[card_start:m.end() + 500]
+            card_start = max(0, m.start() - 5000)
+            card_html = html[card_start:m.end() + 1000]
 
             title = self._extract_title_fast(card_html)
             if not title or len(title) < 10:
@@ -268,6 +360,7 @@ class TGPGrantScraper(BaseScraper):
             deadline_str = self._extract_deadline_fast(card_html)
             funding = self._extract_funding_fast(card_html)
             description = self._extract_description_fast(card_html, title)
+            eligibility = self._extract_eligibility_fast(card_html)
 
             source_path = detail_links.get(grant_id)
             if source_path:
@@ -290,7 +383,7 @@ class TGPGrantScraper(BaseScraper):
                 'title': title,
                 'organization': 'The Grant Portal',
                 'description': description,
-                'eligibility': None,
+                'eligibility': eligibility,
                 'funding_amount': funding,
                 'deadline': deadline,
                 'category': category,
@@ -378,6 +471,27 @@ class TGPGrantScraper(BaseScraper):
             if desc and len(desc) > 20 and desc != title:
                 return desc[:500]
         return None
+
+    @staticmethod
+    def _extract_eligibility_fast(card_html):
+        """Extract eligibility from 'Eligible Requirements' checkbox labels."""
+        section = re.search(
+            r'Eligible\s+Requirements.*?</div>\s*</div>',
+            card_html,
+            re.I | re.DOTALL,
+        )
+        if not section:
+            return None
+        labels = re.findall(
+            r'<label[^>]*>\s*<input[^>]*>\s*(.*?)\s*</label>',
+            section.group(0),
+            re.I | re.DOTALL,
+        )
+        if not labels:
+            return None
+        items = [clean_text(html_mod.unescape(re.sub(r'<[^>]+>', '', l))) for l in labels]
+        items = [i for i in items if i]
+        return '; '.join(items) if items else None
 
     @staticmethod
     def _extract_doc_urls_fast(card_html):

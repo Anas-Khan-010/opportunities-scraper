@@ -32,7 +32,7 @@ class Database:
                 conn.close()
     
     def create_tables(self):
-        """Create necessary database tables"""
+        """Create the opportunities table and indexes (idempotent)."""
         create_table_query = """
         CREATE TABLE IF NOT EXISTS opportunities (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -50,18 +50,17 @@ class Database:
             opportunity_type TEXT DEFAULT NULL,
             posted_date TIMESTAMP,
             document_urls TEXT[],
-            full_document TEXT,
             scraped_at TIMESTAMP DEFAULT NOW(),
             created_at TIMESTAMP DEFAULT NOW()
         );
-        
+
         CREATE INDEX IF NOT EXISTS idx_source ON opportunities(source);
         CREATE INDEX IF NOT EXISTS idx_deadline ON opportunities(deadline);
         CREATE INDEX IF NOT EXISTS idx_category ON opportunities(category);
         CREATE INDEX IF NOT EXISTS idx_scraped_at ON opportunities(scraped_at);
         CREATE INDEX IF NOT EXISTS idx_opportunity_type ON opportunities(opportunity_type);
-        
-        ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS opportunity_type TEXT DEFAULT NULL;
+        CREATE INDEX IF NOT EXISTS idx_location ON opportunities(location);
+        CREATE INDEX IF NOT EXISTS idx_posted_date ON opportunities(posted_date);
         """
         
         try:
@@ -87,22 +86,38 @@ class Database:
             return False
     
     def insert_opportunity(self, data):
-        """Insert new opportunity into database"""
+        """Insert or update opportunity — backfills empty fields on conflict."""
         data_copy = dict(data)
         data_copy.setdefault('opportunity_type', None)
-        data_copy.setdefault('full_document', None)
 
         query = """
         INSERT INTO opportunities (
             title, organization, description, eligibility, funding_amount,
             deadline, category, location, source, source_url, opportunity_number,
-            posted_date, document_urls, full_document, opportunity_type
+            posted_date, document_urls, opportunity_type
         ) VALUES (
             %(title)s, %(organization)s, %(description)s, %(eligibility)s, %(funding_amount)s,
             %(deadline)s, %(category)s, %(location)s, %(source)s, %(source_url)s, %(opportunity_number)s,
-            %(posted_date)s, %(document_urls)s, %(full_document)s, %(opportunity_type)s
+            %(posted_date)s, %(document_urls)s, %(opportunity_type)s
         )
-        ON CONFLICT (source_url) DO NOTHING
+        ON CONFLICT (source_url) DO UPDATE SET
+            title              = COALESCE(NULLIF(opportunities.title, ''), EXCLUDED.title),
+            organization       = COALESCE(opportunities.organization, EXCLUDED.organization),
+            description        = COALESCE(opportunities.description, EXCLUDED.description),
+            eligibility        = COALESCE(opportunities.eligibility, EXCLUDED.eligibility),
+            funding_amount     = COALESCE(opportunities.funding_amount, EXCLUDED.funding_amount),
+            deadline           = COALESCE(opportunities.deadline, EXCLUDED.deadline),
+            category           = COALESCE(opportunities.category, EXCLUDED.category),
+            location           = COALESCE(opportunities.location, EXCLUDED.location),
+            opportunity_number = COALESCE(opportunities.opportunity_number, EXCLUDED.opportunity_number),
+            posted_date        = COALESCE(opportunities.posted_date, EXCLUDED.posted_date),
+            document_urls      = CASE
+                WHEN opportunities.document_urls IS NULL OR array_length(opportunities.document_urls, 1) IS NULL
+                THEN EXCLUDED.document_urls
+                ELSE opportunities.document_urls
+            END,
+            opportunity_type   = COALESCE(opportunities.opportunity_type, EXCLUDED.opportunity_type),
+            scraped_at         = NOW()
         RETURNING id
         """
         
@@ -112,13 +127,13 @@ class Database:
                     cur.execute(query, data_copy)
                     result = cur.fetchone()
                     if result:
-                        logger.info(f"Inserted opportunity: {data_copy['title']}")
+                        logger.info(f"Upserted opportunity: {data_copy['title']}")
                         return result[0]
                     else:
-                        logger.debug(f"Duplicate skipped: {data_copy['title']}")
+                        logger.debug(f"Skipped: {data_copy['title']}")
                         return None
         except Exception as e:
-            logger.error(f"Error inserting opportunity: {e}")
+            logger.error(f"Error upserting opportunity: {e}")
             return None
     
     def get_stats(self):

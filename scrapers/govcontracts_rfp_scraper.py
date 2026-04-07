@@ -2,15 +2,11 @@
 GovernmentContracts.us RFP scraper — scrapes state & local procurement
 opportunities from governmentcontracts.us.
 
-Primary aggregated RFP source covering all 50 US states with 29,000+ active
-contract opportunities.  Uses plain requests + BeautifulSoup (no Selenium)
-since the site is server-rendered HTML.
+Primary aggregated RFP source covering all 50 US states.
+Uses plain requests + BeautifulSoup (server-rendered HTML).
 
-Listing URL pattern:
-  /government-contracts/?gov=sl&state={XX}&sort=postdesc&page={N}
-  where XX is the 2-letter state abbreviation.
-
-Detail pages are behind a login wall so we only extract data from listings.
+Listing page -> get titles, dates, detail links
+Detail page  -> get agency, description, document URLs
 """
 
 import re
@@ -19,10 +15,11 @@ import random
 import urllib.parse
 
 from scrapers.base_scraper import BaseScraper
+from config.settings import config
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
 
-BASE_URL = 'https://www.governmentcontracts.us'
+BASE_URL = config.GOVCONTRACTS_BASE_URL
 LISTING_PATH = '/government-contracts/'
 
 STATES = {
@@ -45,8 +42,9 @@ STATES = {
     'WI': 'Wisconsin',     'WY': 'Wyoming',
 }
 
-MAX_PAGES_PER_STATE = 5
+MAX_PAGES_PER_STATE = config.GOVCONTRACTS_MAX_PAGES_PER_STATE
 DELAY_BETWEEN_REQUESTS = (1.0, 2.0)
+DELAY_BETWEEN_DETAILS = (1.0, 2.0)
 DELAY_BETWEEN_STATES = (1.5, 3.0)
 
 _USER_AGENT = (
@@ -57,8 +55,9 @@ _USER_AGENT = (
 
 class GovContractsRFPScraper(BaseScraper):
     """
-    Scrapes GovernmentContracts.us — a US procurement aggregator with 29,000+
+    Scrapes GovernmentContracts.us — a US procurement aggregator with
     active state & local contract/RFP opportunities across all 50 states.
+    Visits detail pages for agency, description, and document URLs.
     """
 
     def __init__(self):
@@ -73,6 +72,8 @@ class GovContractsRFPScraper(BaseScraper):
         logger.info("Starting GovernmentContracts.us RFP scraper (all 50 states)...")
 
         for abbr in sorted(STATES):
+            if self.reached_limit():
+                break
             state_name = STATES[abbr]
             try:
                 self._scrape_state(abbr, state_name)
@@ -100,9 +101,13 @@ class GovContractsRFPScraper(BaseScraper):
             if not page_items:
                 break
 
-            self.opportunities.extend(page_items)
+            for opp in page_items:
+                self._enrich_from_detail(opp)
+                self.add_opportunity(opp)
+                if self.reached_limit():
+                    break
 
-            if not self._has_next_page(resp.text, page):
+            if self.reached_limit() or not self._has_next_page(resp.text, page):
                 break
 
         added = len(self.opportunities) - count_before
@@ -175,11 +180,92 @@ class GovContractsRFPScraper(BaseScraper):
             'location': location,
             'source': f'GovContracts - {location} RFPs',
             'source_url': source_url,
-            'opportunity_number': None,
+            'opportunity_number': opp_id,
             'posted_date': posted_date,
             'document_urls': [],
             'opportunity_type': 'rfp',
         }
+
+    # ------------------------------------------------------------------
+    # Detail page enrichment
+    # ------------------------------------------------------------------
+
+    def _enrich_from_detail(self, opp):
+        """Visit detail page and extract fields from the public table.
+        Description, attachments, solicitation numbers, and publication URL
+        are behind a login wall on most listings."""
+        detail_url = opp.get('source_url', '')
+        if not detail_url:
+            return
+
+        time.sleep(random.uniform(*DELAY_BETWEEN_DETAILS))
+        resp = self.fetch_page(detail_url)
+        if resp is None:
+            return
+
+        try:
+            soup = self.parse_html(resp.text)
+            container = soup.find('div', class_='detail-contents') or soup
+
+            agency = self._extract_table_field(container, 'Agency')
+            if agency:
+                opp['organization'] = agency
+
+            cat_raw = self._extract_table_field(container, 'Category')
+            if cat_raw:
+                opp['category'] = clean_text(cat_raw)[:200]
+
+            gov_type = self._extract_table_field(container, 'Type of Government')
+            if gov_type:
+                opp['eligibility'] = gov_type
+
+            desc = self._extract_table_field(container, 'Bid Description')
+            if desc and 'log in' not in desc.lower() and 'access bid' not in desc.lower():
+                opp['description'] = desc[:2000]
+
+            sol_no = self._extract_table_field(container, 'Solicitation')
+            if sol_no and 'log in' not in sol_no.lower():
+                opp['opportunity_number'] = sol_no
+
+            pub_url = self._extract_table_link(container, 'Publication URL')
+            if pub_url:
+                opp['document_urls'] = [pub_url]
+
+            attachment_url = self._extract_table_link(container, 'Attachment')
+            if attachment_url:
+                existing = opp.get('document_urls') or []
+                if attachment_url not in existing:
+                    existing.append(attachment_url)
+                opp['document_urls'] = existing
+
+        except Exception as exc:
+            logger.debug(f"GovContracts: detail parse error for {detail_url}: {exc}")
+
+    @staticmethod
+    def _extract_table_field(container, label):
+        """Extract value from <tr><th>Label:</th><td>value</td></tr> pattern."""
+        for th in container.find_all('th'):
+            if label.lower() in th.get_text().lower():
+                td = th.find_next_sibling('td')
+                if td:
+                    val = clean_text(td.get_text())
+                    if val:
+                        return val
+        return None
+
+    @staticmethod
+    def _extract_table_link(container, label):
+        """Extract an <a href> URL from a table row, ignoring login-gated links."""
+        for th in container.find_all('th'):
+            if label.lower() in th.get_text().lower():
+                td = th.find_next_sibling('td')
+                if td:
+                    a = td.find('a', href=True)
+                    if a:
+                        href = a.get('href', '').strip()
+                        if href and 'signin' not in href and 'login' not in href:
+                            return href
+        return None
 
     # ------------------------------------------------------------------
     # Helpers

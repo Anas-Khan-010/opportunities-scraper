@@ -143,6 +143,8 @@ class GrantsGovScraper(BaseScraper):
 
         try:
             for keyword in keywords:
+                if self.reached_limit():
+                    break
                 logger.info(f"Searching keyword: '{keyword}'")
                 logger.info(f"\n🔍 Searching keyword: '{keyword}'")
                 keyword_count = 0
@@ -207,9 +209,14 @@ class GrantsGovScraper(BaseScraper):
                                 opportunity['description'] or ''
                             )
 
-                        self.opportunities.append(opportunity)
-                        keyword_count += 1
+                        is_new = self.add_opportunity(opportunity)
+                        if is_new:
+                            keyword_count += 1
                         logger.info(f"  ✅ Extracted: {opportunity['title'][:60]}...")
+
+                        if self.reached_limit():
+                            skip_keyword = True
+                            break
 
                     logger.info(f"📄 Page {page + 1} complete. Total for '{keyword}' so far: {keyword_count}")
                     

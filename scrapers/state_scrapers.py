@@ -18,10 +18,28 @@ import random
 import re
 import urllib.parse
 from scrapers.base_scraper import BaseScraper
+from config.settings import config
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
 
-SELENIUM_DELAY_RANGE = (4, 9)
+SELENIUM_DELAY_RANGE = (config.SELENIUM_DELAY_MIN, config.SELENIUM_DELAY_MAX)
+
+_TITLE_BLOCKLIST = {
+    'here', 'click here', 'click', 'more', 'read more', 'learn more',
+    'view', 'view details', 'details', 'download', 'link', 'submit',
+    'apply', 'apply now', 'register', 'sign in', 'login', 'log in',
+    'home', 'back', 'next', 'previous', 'close', 'open', 'see more',
+}
+
+
+def _title_is_garbage(title: str) -> bool:
+    """Reject generic/navigational link text that isn't a real title."""
+    if not title or len(title) < 6:
+        return True
+    if title.lower().strip() in _TITLE_BLOCKLIST:
+        return True
+    return False
+
 
 # When fallback_procurement_only is set on a config, only keep links whose text
 # looks like a solicitation (stops MS/MI-style portals from harvesting nav noise).
@@ -195,7 +213,9 @@ class StateAPIScraper(BaseScraper):
                 for record in records:
                     opp = self.parse_opportunity(record)
                     if opp:
-                        self.opportunities.append(opp)
+                        self.add_opportunity(opp)
+                    if self.reached_limit():
+                        break
 
                 logger.info(
                     f"  Fetched offset {offset}-{offset + len(records)}, "
@@ -203,7 +223,7 @@ class StateAPIScraper(BaseScraper):
                 )
                 offset += page_size
 
-                if total and offset >= total:
+                if self.reached_limit() or (total and offset >= total):
                     break
 
             except Exception as e:
@@ -370,7 +390,7 @@ class StateHTMLScraper(BaseScraper):
                 if not category:
                     category = categorize_opportunity(title, description or '')
 
-                self.opportunities.append({
+                opp = {
                     'title': title,
                     'organization': self.organization,
                     'description': description,
@@ -385,7 +405,11 @@ class StateHTMLScraper(BaseScraper):
                     'posted_date': None,
                     'document_urls': [],
                     'opportunity_type': self.opportunity_type,
-                })
+                }
+                self._enrich_from_detail_page(opp)
+                self.add_opportunity(opp)
+                if self.reached_limit():
+                    break
             except Exception as e:
                 logger.debug(f"Skipping row in {self.state_name}: {e}")
                 continue
@@ -435,7 +459,7 @@ class StateHTMLScraper(BaseScraper):
 
                 category = categorize_opportunity(title, '')
 
-                self.opportunities.append({
+                opp = {
                     'title': title,
                     'organization': self.organization,
                     'description': None,
@@ -450,7 +474,52 @@ class StateHTMLScraper(BaseScraper):
                     'posted_date': None,
                     'document_urls': [],
                     'opportunity_type': self.opportunity_type,
-                })
+                }
+                self._enrich_from_detail_page(opp)
+                self.add_opportunity(opp)
+                if self.reached_limit():
+                    break
+
+    def _enrich_from_detail_page(self, opp):
+        """Visit source_url to extract description, doc links from the page."""
+        url = opp.get('source_url', '')
+        if not url:
+            return
+        try:
+            time.sleep(random.uniform(1.0, 2.0))
+            resp = self.fetch_page(url)
+            if not resp:
+                return
+            soup = self.parse_html(resp.content)
+
+            meta = soup.find('meta', attrs={'name': 'description'})
+            if meta and meta.get('content'):
+                desc = clean_text(meta['content'])
+                if desc and len(desc) > 20:
+                    opp['description'] = desc[:1000]
+
+            if not opp.get('description'):
+                for p in soup.find_all('p'):
+                    text = clean_text(p.get_text())
+                    if text and len(text) > 50:
+                        opp['description'] = text[:1000]
+                        break
+
+            doc_urls = []
+            for a in soup.find_all('a', href=True):
+                h = a['href']
+                if any(h.lower().endswith(ext) for ext in ('.pdf', '.doc', '.docx', '.xls', '.xlsx')):
+                    full = urllib.parse.urljoin(url, h)
+                    if full not in doc_urls:
+                        doc_urls.append(full)
+            if doc_urls:
+                opp['document_urls'] = doc_urls[:10]
+
+            if opp.get('description'):
+                opp['category'] = categorize_opportunity(opp['title'], opp['description'])
+
+        except Exception as exc:
+            logger.debug(f"Detail enrichment failed for {url}: {exc}")
 
     def parse_opportunity(self, element):
         """Required by BaseScraper ABC."""
@@ -596,7 +665,7 @@ class StateSeleniumScraper(BaseScraper):
                 title = clean_text(link.text)
                 href = (link.get('href') or '').strip()
 
-                if not title or len(title) < 3:
+                if not title or len(title) < 3 or _title_is_garbage(title):
                     continue
                 if not href or href == '#' or href.startswith('javascript'):
                     continue
@@ -610,7 +679,9 @@ class StateSeleniumScraper(BaseScraper):
 
                 opp = self._build_opportunity(item, title, href)
                 if opp:
-                    self.opportunities.append(opp)
+                    self.add_opportunity(opp)
+                if self.reached_limit():
+                    break
 
             except Exception as e:
                 logger.debug(f"Skipping item in {self.state_name}: {e}")
@@ -693,7 +764,7 @@ class StateSeleniumScraper(BaseScraper):
                 local_docs = self._collect_doc_urls(parent, self.portal_url) if parent else []
 
                 category = categorize_opportunity(title, '')
-                self.opportunities.append({
+                self.add_opportunity({
                     'title': title,
                     'organization': self.organization,
                     'description': None,
@@ -709,6 +780,8 @@ class StateSeleniumScraper(BaseScraper):
                     'document_urls': local_docs or page_doc_urls[:5],
                     'opportunity_type': self.opportunity_type,
                 })
+                if self.reached_limit():
+                    break
 
     def _build_opportunity(self, item, title, source_url):
         description = None

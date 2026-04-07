@@ -100,12 +100,8 @@ class OpportunityEnricher:
                 continue
         
         if full_text:
-            opportunity['full_document'] = full_text[:50000]  # Limit to 50k chars
-            
-            # Extract additional info from documents
             if not opportunity.get('description'):
-                # Use first 500 chars as description
-                opportunity['description'] = full_text[:500]
+                opportunity['description'] = full_text[:2000]
         
         return opportunity
     

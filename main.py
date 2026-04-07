@@ -1,157 +1,133 @@
 #!/usr/bin/env python3
 """
-RFP and Grants Scraping System
-Main orchestrator script that runs all scrapers and stores data in Supabase
+US Government Opportunities Scraping System
+
+Main orchestrator — runs all scrapers and stores data in Supabase.
+Targets 1,000,000+ grants, contracts, and RFPs across all 50 US states,
+federal agencies, and research foundations.
+
+Scraper pipeline:
+  - Grants.gov              Federal grants (API + Selenium detail pages)
+  - SAM.gov                 Federal contracts (API, rate-limited)
+  - Duke Research Funding   Foundation / research grants (Selenium)
+  - California Grants       State grants (CKAN open-data API)
+  - The Grant Portal        State grants across all 50 states (Selenium)
+  - Texas ESBD              TX grants, solicitations, pre-solicitations (Selenium)
+  - NC eVP                  North Carolina solicitations (Selenium)
+  - GovernmentContracts.us  State & local RFPs across all 50 states (HTML)
+  - RFPMart                 Federal + state RFPs — largest source (HTML)
+
+Each opportunity is written to the database in real-time as it is scraped,
+so no data is lost if the process is interrupted.
 """
 
 import sys
 from datetime import datetime
 from database.db import db
 from utils.logger import logger
-from parsers.parser_utils import OpportunityEnricher
-
-# Import federal scrapers
 from scrapers.grants_gov import GrantsGovScraper
 from scrapers.sam_gov import SAMGovScraper
 from scrapers.foundation_scrapers import DukeResearchFundingScraper
-from scrapers.state_scrapers import (
-    CaliforniaScraper,
-    TexasScraper,
-    FloridaScraper,
-    NewYorkScraper,
-    PennsylvaniaScraper,
-    IllinoisScraper,
-    OhioScraper,
-    GeorgiaScraper,
-    NorthCarolinaScraper,
-    MichiganScraper
-)
+from scrapers.state_grant_scrapers import get_all_state_grant_scrapers
+from scrapers.tgp_grant_scraper import get_tgp_grant_scrapers
+from scrapers.texas_esbd_scraper import get_texas_esbd_scrapers
+from scrapers.nc_evp_scraper import get_nc_evp_scrapers
+from scrapers.govcontracts_rfp_scraper import get_govcontracts_rfp_scrapers
+from scrapers.rfpmart_scraper import get_rfpmart_scrapers
+from scrapers.state_scrapers import cleanup_state_scrapers
+
 
 class ScraperOrchestrator:
     """Orchestrates all scrapers and manages data pipeline"""
-    
+
     def __init__(self):
         self.scrapers = []
         self.stats = {
             'total_scraped': 0,
             'total_inserted': 0,
             'total_duplicates': 0,
-            'total_errors': 0
+            'total_errors': 0,
         }
-    
-    def register_scrapers(self):
-        """Register all available scrapers"""
-        logger.info("Registering scrapers...")
-        
-        # ── Federal sources ────────────────────────────────────────────
-        self.scrapers.append(GrantsGovScraper())
-        self.scrapers.append(SAMGovScraper())
-        
-        # ── Research grants ────────────────────────────────────────────
-        self.scrapers.append(NIHGrantsScraper())
-        self.scrapers.append(NSFGrantsScraper())
-        
-        # ── Foundation grants ──────────────────────────────────────────
-        self.scrapers.append(GrantWatchScraper())
-        self.scrapers.append(GatesFoundationScraper())
-        self.scrapers.append(FordFoundationScraper())
-        self.scrapers.append(RWJFScraper())
-        self.scrapers.append(KelloggFoundationScraper())
-        self.scrapers.append(MacArthurFoundationScraper())
-        
-        # ── State GRANTS: TGP (primary — all 50 states) ───────────────
-        self.scrapers.extend(get_tgp_grant_scrapers())
 
-        # ── State GRANTS: supplementary verified sources (CA, NC, VA…) ─
+    def register_scrapers(self):
+        """Register all scrapers in the defined run order."""
+        logger.info("Registering scrapers...")
+
+        # 1 ── Grants.gov (federal grants) ─────────────────────────────
+        self.scrapers.append(GrantsGovScraper())
+
+        # 2 ── SAM.gov (federal contracts) ─────────────────────────────
+        self.scrapers.append(SAMGovScraper())
+
+        # 3 ── Foundation / research grants ────────────────────────────
+        self.scrapers.append(DukeResearchFundingScraper())
+
+        # 4 ── State grants — supplementary (CA API) ──────────────────
         self.scrapers.extend(get_all_state_grant_scrapers())
 
-        # ── State RFPs: GovContracts.us (primary — all 50 states) ────
+        # 5 ── TGP grants (thegrantportal.com — all 50 states) ────────
+        self.scrapers.extend(get_tgp_grant_scrapers())
+
+        # 6 ── Texas ESBD (grants + solicitations + pre-solicitations) ─
+        self.scrapers.extend(get_texas_esbd_scrapers())
+
+        # 7 ── NC eVP (North Carolina solicitations) ──────────────────
+        self.scrapers.extend(get_nc_evp_scrapers())
+
+        # 8 ── GovContracts RFPs (governmentcontracts.us — all 50) ────
         self.scrapers.extend(get_govcontracts_rfp_scrapers())
 
-        # ── State RFPs: supplementary Selenium scrapers ──────────────
-        self.scrapers.extend(get_all_state_rfp_scrapers())
-        
+        # 9 ── RFPMart (rfpmart.com — massive US RFP aggregator) ────
+        self.scrapers.extend(get_rfpmart_scrapers())
+
         logger.info(f"Registered {len(self.scrapers)} scrapers")
-    
+
     def run_scrapers(self):
         """Run all registered scrapers"""
         logger.info("=" * 80)
         logger.info("Starting scraping session")
         logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 80)
-        
+
         for scraper in self.scrapers:
             try:
                 logger.info(f"\n{'=' * 60}")
                 logger.info(f"Running scraper: {scraper.source_name}")
                 logger.info(f"{'=' * 60}")
-                
-                # Run scraper
+
                 opportunities = scraper.scrape()
                 self.stats['total_scraped'] += len(opportunities)
-                
-                # Process and store opportunities
-                self.process_opportunities(opportunities)
-                
+                self.stats['total_inserted'] += scraper._new_count
+                self.stats['total_duplicates'] += scraper._dup_count
+
             except KeyboardInterrupt:
-                logger.warning(f"\n⚠️ User interruption detected during {scraper.source_name} execution. Rescuing scraped data before shutdown...")
-                if getattr(scraper, 'opportunities', None):
-                    logger.info(f"Rescuing {len(scraper.opportunities)} pending opportunities...")
-                    self.process_opportunities(scraper.opportunities)
-                raise  # Re-raise to shutdown the overarching main() loop safely
-                
+                logger.warning(
+                    f"\nUser interruption during {scraper.source_name}. "
+                    "Data scraped so far is already saved to the database."
+                )
+                self.stats['total_scraped'] += len(getattr(scraper, 'opportunities', []))
+                self.stats['total_inserted'] += getattr(scraper, '_new_count', 0)
+                self.stats['total_duplicates'] += getattr(scraper, '_dup_count', 0)
+                raise
+
             except Exception as e:
                 logger.error(f"Error running scraper {scraper.source_name}: {e}")
+                self.stats['total_scraped'] += len(getattr(scraper, 'opportunities', []))
+                self.stats['total_inserted'] += getattr(scraper, '_new_count', 0)
+                self.stats['total_duplicates'] += getattr(scraper, '_dup_count', 0)
                 self.stats['total_errors'] += 1
                 continue
-    
-    def process_opportunities(self, opportunities):
-        """Process and store opportunities in database"""
-        for opp in opportunities:
-            try:
-                # Validate opportunity
-                if not OpportunityEnricher.validate_opportunity(opp):
-                    logger.warning(f"Invalid opportunity: {opp.get('title', 'Unknown')}")
-                    self.stats['total_errors'] += 1
-                    continue
-                
-                # Check if already exists
-                if db.opportunity_exists(opp['source_url']):
-                    logger.debug(f"Duplicate: {opp['title']}")
-                    self.stats['total_duplicates'] += 1
-                    continue
-                
-                # Enrich with documents if available
-                if opp.get('document_urls'):
-                    opp = OpportunityEnricher.enrich_with_documents(
-                        opp, 
-                        opp['document_urls']
-                    )
-                
-                # Insert into database
-                result = db.insert_opportunity(opp)
-                
-                if result:
-                    self.stats['total_inserted'] += 1
-                else:
-                    self.stats['total_duplicates'] += 1
-                
-            except Exception as e:
-                logger.error(f"Error processing opportunity: {e}")
-                self.stats['total_errors'] += 1
-                continue
-    
+
     def print_summary(self):
         """Print scraping session summary"""
         logger.info("\n" + "=" * 80)
         logger.info("SCRAPING SESSION SUMMARY")
         logger.info("=" * 80)
         logger.info(f"Total opportunities scraped: {self.stats['total_scraped']}")
-        logger.info(f"New opportunities inserted: {self.stats['total_inserted']}")
-        logger.info(f"Duplicates skipped: {self.stats['total_duplicates']}")
-        logger.info(f"Errors encountered: {self.stats['total_errors']}")
-        
-        # Get database stats
+        logger.info(f"New opportunities inserted:  {self.stats['total_inserted']}")
+        logger.info(f"Duplicates skipped:          {self.stats['total_duplicates']}")
+        logger.info(f"Errors encountered:          {self.stats['total_errors']}")
+
         db_stats = db.get_stats()
         if db_stats:
             logger.info("\nDATABASE STATISTICS")
@@ -159,7 +135,7 @@ class ScraperOrchestrator:
             logger.info(f"Total opportunities in database: {db_stats.get('total', 0)}")
             logger.info(f"Active opportunities (future deadline): {db_stats.get('active', 0)}")
             logger.info(f"Unique sources: {db_stats.get('sources', 0)}")
-        
+
         logger.info("=" * 80)
         logger.info(f"Session completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 80 + "\n")
@@ -169,35 +145,28 @@ def main():
     """Main entry point"""
     try:
         logger.info("Initializing RFP and Grants Scraping System...")
-        
-        # Initialize database
+
         logger.info("Setting up database...")
         db.create_tables()
-        
-        # Create orchestrator
+
         orchestrator = ScraperOrchestrator()
-        
-        # Register scrapers
         orchestrator.register_scrapers()
-        
-        # Run scrapers
         orchestrator.run_scrapers()
-        
-        # Print summary
         orchestrator.print_summary()
-        
-        # Close shared Selenium driver used by state scrapers
+
         cleanup_state_scrapers()
-        
+
         logger.info("System shutdown complete")
         return 0
-        
+
     except KeyboardInterrupt:
         logger.warning("\nScraping interrupted by user")
+        cleanup_state_scrapers()
         return 1
-        
+
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
+        cleanup_state_scrapers()
         return 1
 
 

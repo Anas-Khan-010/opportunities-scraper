@@ -226,7 +226,7 @@ class DukeResearchFundingScraper(BaseScraper):
                 )
 
                 for canonical_url in new_on_page:
-                    if max_opportunities and parsed_ok >= max_opportunities:
+                    if (max_opportunities and parsed_ok >= max_opportunities) or self.reached_limit():
                         break
 
                     if db.opportunity_exists(canonical_url):
@@ -235,8 +235,9 @@ class DukeResearchFundingScraper(BaseScraper):
 
                     opportunity = self._fetch_and_parse_detail(canonical_url)
                     if opportunity:
-                        self.opportunities.append(opportunity)
-                        parsed_ok += 1
+                        is_new = self.add_opportunity(opportunity)
+                        if is_new:
+                            parsed_ok += 1
                         logger.info(
                             f"[page {pages_visited + 1}] Parsed ({parsed_ok}): "
                             f"{opportunity['title'][:80]}"
@@ -249,9 +250,9 @@ class DukeResearchFundingScraper(BaseScraper):
 
                 pages_visited += 1
 
-                if max_opportunities and parsed_ok >= max_opportunities:
+                if (max_opportunities and parsed_ok >= max_opportunities) or self.reached_limit():
                     logger.info(
-                        f"Reached max_opportunities cap ({max_opportunities})"
+                        f"Reached opportunity cap (max_opportunities={max_opportunities}, limit={self._max_new})"
                     )
                     break
 
@@ -688,7 +689,7 @@ class DukeResearchFundingScraper(BaseScraper):
             "opportunity_number": slug,
             "posted_date": parse_date(posted_raw) if posted_raw else None,
             "document_urls": [],
-            "full_document": None,
+            "opportunity_type": "grant",
         }
 
     # ------------------------------------------------------------------

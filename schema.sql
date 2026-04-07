@@ -1,139 +1,80 @@
--- RFP and Grants Database Schema
--- PostgreSQL / Supabase
+-- ============================================================================
+-- Opportunities Scraper — Database Schema
+-- Target: Supabase (PostgreSQL 15+)
+-- ============================================================================
+-- Run this once in the Supabase SQL Editor to create (or recreate) the table.
+-- If the table already exists, DROP it first:
+--   DROP TABLE IF EXISTS opportunities CASCADE;
+-- ============================================================================
 
--- Drop existing table if needed (use with caution)
--- DROP TABLE IF EXISTS opportunities CASCADE;
-
--- Create opportunities table
 CREATE TABLE IF NOT EXISTS opportunities (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    
-    -- Core fields
-    title TEXT NOT NULL,
-    organization TEXT,
-    description TEXT,
-    eligibility TEXT,
-    
-    -- Financial info
-    funding_amount TEXT,
-    
-    -- Dates
-    deadline TIMESTAMP,
-    posted_date TIMESTAMP,
-    scraped_at TIMESTAMP DEFAULT NOW(),
-    created_at TIMESTAMP DEFAULT NOW(),
-    
-    -- Classification
-    category TEXT,
-    location TEXT,
-    
-    -- Source tracking
-    source TEXT NOT NULL,
-    source_url TEXT UNIQUE NOT NULL,
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title             TEXT NOT NULL,
+    organization      TEXT,
+    description       TEXT,
+    eligibility       TEXT,
+    funding_amount    TEXT,
+    deadline          TIMESTAMP,
+    category          TEXT,
+    location          TEXT,
+    source            TEXT NOT NULL,
+    source_url        TEXT UNIQUE NOT NULL,
     opportunity_number TEXT,
-    
-    -- Type classification (grant, rfp, contract, etc.)
-    opportunity_type TEXT DEFAULT NULL,
-    
-    -- Documents
-    document_urls TEXT[],
-    full_document TEXT  -- deprecated: no longer populated by scrapers
+    opportunity_type  TEXT DEFAULT NULL,
+    posted_date       TIMESTAMP,
+    document_urls     TEXT[],
+    scraped_at        TIMESTAMP DEFAULT NOW(),
+    created_at        TIMESTAMP DEFAULT NOW()
 );
 
--- Create indexes for better query performance
-CREATE INDEX IF NOT EXISTS idx_source ON opportunities(source);
-CREATE INDEX IF NOT EXISTS idx_deadline ON opportunities(deadline);
-CREATE INDEX IF NOT EXISTS idx_category ON opportunities(category);
-CREATE INDEX IF NOT EXISTS idx_scraped_at ON opportunities(scraped_at);
-CREATE INDEX IF NOT EXISTS idx_posted_date ON opportunities(posted_date);
-CREATE INDEX IF NOT EXISTS idx_organization ON opportunities(organization);
+-- ── Performance indexes ──────────────────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_source           ON opportunities(source);
+CREATE INDEX IF NOT EXISTS idx_deadline         ON opportunities(deadline);
+CREATE INDEX IF NOT EXISTS idx_category         ON opportunities(category);
+CREATE INDEX IF NOT EXISTS idx_scraped_at       ON opportunities(scraped_at);
 CREATE INDEX IF NOT EXISTS idx_opportunity_type ON opportunities(opportunity_type);
+CREATE INDEX IF NOT EXISTS idx_location         ON opportunities(location);
+CREATE INDEX IF NOT EXISTS idx_posted_date      ON opportunities(posted_date);
 
--- Create full-text search index
-CREATE INDEX IF NOT EXISTS idx_title_search ON opportunities USING gin(to_tsvector('english', title));
-CREATE INDEX IF NOT EXISTS idx_description_search ON opportunities USING gin(to_tsvector('english', description));
+-- Full-text search on title + description
+CREATE INDEX IF NOT EXISTS idx_fts ON opportunities
+    USING GIN (to_tsvector('english', coalesce(title, '') || ' ' || coalesce(description, '')));
 
--- Create view for active opportunities
+-- ── Useful views ─────────────────────────────────────────────────────────────
+
 CREATE OR REPLACE VIEW active_opportunities AS
-SELECT 
-    id,
-    title,
-    organization,
-    funding_amount,
-    deadline,
-    category,
-    location,
-    source,
-    source_url,
-    posted_date,
-    opportunity_type
-FROM opportunities
-WHERE deadline > NOW() OR deadline IS NULL
-ORDER BY posted_date DESC;
+SELECT * FROM opportunities
+WHERE deadline IS NULL OR deadline > NOW()
+ORDER BY posted_date DESC NULLS LAST;
 
--- Create view for recent opportunities
 CREATE OR REPLACE VIEW recent_opportunities AS
-SELECT 
-    id,
-    title,
-    organization,
-    funding_amount,
-    deadline,
-    category,
+SELECT * FROM opportunities
+ORDER BY scraped_at DESC
+LIMIT 500;
+
+CREATE OR REPLACE VIEW opportunity_stats AS
+SELECT
     source,
     opportunity_type,
-    scraped_at
+    COUNT(*)                                          AS total,
+    COUNT(CASE WHEN deadline > NOW() THEN 1 END)     AS active,
+    MIN(posted_date)                                  AS earliest_posted,
+    MAX(posted_date)                                  AS latest_posted
 FROM opportunities
-ORDER BY scraped_at DESC
-LIMIT 100;
+GROUP BY source, opportunity_type
+ORDER BY total DESC;
 
--- Create statistics view
-CREATE OR REPLACE VIEW opportunity_stats AS
-SELECT 
-    COUNT(*) as total_opportunities,
-    COUNT(DISTINCT source) as total_sources,
-    COUNT(CASE WHEN deadline > NOW() THEN 1 END) as active_opportunities,
-    COUNT(CASE WHEN deadline <= NOW() THEN 1 END) as expired_opportunities,
-    COUNT(CASE WHEN scraped_at > NOW() - INTERVAL '7 days' THEN 1 END) as new_this_week,
-    MAX(scraped_at) as last_scrape_time
-FROM opportunities;
+-- ── Maintenance function ─────────────────────────────────────────────────────
 
--- Create function to clean old opportunities (optional)
-CREATE OR REPLACE FUNCTION clean_old_opportunities(days_old INTEGER DEFAULT 365)
+CREATE OR REPLACE FUNCTION clean_old_opportunities(days_old INTEGER DEFAULT 180)
 RETURNS INTEGER AS $$
 DECLARE
-    deleted_count INTEGER;
+    deleted INTEGER;
 BEGIN
     DELETE FROM opportunities
-    WHERE deadline < NOW() - INTERVAL '1 day' * days_old
-    AND deadline IS NOT NULL;
-    
-    GET DIAGNOSTICS deleted_count = ROW_COUNT;
-    RETURN deleted_count;
+    WHERE deadline < NOW() - (days_old || ' days')::INTERVAL;
+    GET DIAGNOSTICS deleted = ROW_COUNT;
+    RETURN deleted;
 END;
 $$ LANGUAGE plpgsql;
-
--- Example queries
-
--- Get all active grants
--- SELECT * FROM active_opportunities WHERE category = 'Research';
-
--- Get opportunities by source
--- SELECT source, COUNT(*) FROM opportunities GROUP BY source ORDER BY COUNT(*) DESC;
-
--- Search opportunities by keyword
--- SELECT title, organization, deadline 
--- FROM opportunities 
--- WHERE to_tsvector('english', title || ' ' || COALESCE(description, '')) @@ to_tsquery('english', 'healthcare');
-
--- Get statistics
--- SELECT * FROM opportunity_stats;
-
--- Clean old opportunities (older than 1 year)
--- SELECT clean_old_opportunities(365);
-
-COMMENT ON TABLE opportunities IS 'Stores RFP and grant opportunities from various sources';
-COMMENT ON COLUMN opportunities.source_url IS 'Unique URL - prevents duplicates';
-COMMENT ON COLUMN opportunities.document_urls IS 'Array of PDF/document URLs';
-COMMENT ON COLUMN opportunities.full_document IS 'Deprecated — no longer populated by scrapers';
-COMMENT ON COLUMN opportunities.opportunity_type IS 'Type: grant, rfp, contract';
