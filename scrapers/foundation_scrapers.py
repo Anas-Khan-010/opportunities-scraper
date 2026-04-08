@@ -1,4 +1,5 @@
 import os
+import random
 import re
 import time
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -541,6 +542,10 @@ class DukeResearchFundingScraper(BaseScraper):
                         self._wait.until(
                             lambda d: d.current_url != current_url
                         )
+                        try:
+                            self._wait_for_document_ready(timeout=30)
+                        except TimeoutException:
+                            pass
                         return True
                 except (TimeoutException, WebDriverException):
                     continue
@@ -589,6 +594,7 @@ class DukeResearchFundingScraper(BaseScraper):
             self._wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "h1"))
             )
+            time.sleep(random.uniform(3, 5))
             soup = self.parse_html(self._driver.page_source)
             self._sync_cookies()
             return self._parse_detail_soup(soup, url)

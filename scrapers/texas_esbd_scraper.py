@@ -90,14 +90,24 @@ class TexasESBDScraper(BaseScraper):
 
         time.sleep(random.uniform(*SELENIUM_DELAY_RANGE))
         driver.get(section['url'])
-        time.sleep(random.uniform(3, 6))
 
         try:
-            WebDriverWait(driver, 20).until(
+            WebDriverWait(driver, 30).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except Exception:
+            logger.debug(f"Texas ESBD: readyState timeout for {section['name']}, continuing")
+
+        time.sleep(random.uniform(4, 8))
+
+        try:
+            WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, '.esbd-result-row'))
             )
         except Exception:
             logger.warning(f"Texas ESBD: timed out waiting for {section['name']} listing")
+
+        time.sleep(random.uniform(2, 4))
 
         page = 1
         seen_urls = set()
@@ -228,12 +238,19 @@ class TexasESBDScraper(BaseScraper):
             driver.get(detail_url)
 
             try:
-                WebDriverWait(driver, 20).until(
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                pass
+
+            try:
+                WebDriverWait(driver, 30).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, '.esbd-result-cell'))
                 )
             except Exception:
                 pass
-            time.sleep(random.uniform(2, 4))
+            time.sleep(random.uniform(4, 7))
 
             soup = self.parse_html(driver.page_source)
 
@@ -390,6 +407,13 @@ class TexasESBDScraper(BaseScraper):
             for link in next_links:
                 if link.is_displayed():
                     link.click()
+                    try:
+                        from selenium.webdriver.support.ui import WebDriverWait
+                        WebDriverWait(driver, 30).until(
+                            lambda d: d.execute_script("return document.readyState") == "complete"
+                        )
+                    except Exception:
+                        pass
                     time.sleep(random.uniform(3, 6))
                     return True
 

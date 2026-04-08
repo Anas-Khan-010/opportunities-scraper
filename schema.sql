@@ -23,8 +23,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
     opportunity_type  TEXT DEFAULT NULL,
     posted_date       TIMESTAMP,
     document_urls     TEXT[],
-    scraped_at        TIMESTAMP DEFAULT NOW(),
-    created_at        TIMESTAMP DEFAULT NOW()
+    scraped_at        TIMESTAMP DEFAULT NOW()
 );
 
 -- ── Performance indexes ──────────────────────────────────────────────────────

@@ -102,6 +102,13 @@ class TGPGrantScraper(BaseScraper):
         try:
             logger.info("TGP: attempting login...")
             driver.get(LOGIN_URL)
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                pass
             time.sleep(random.uniform(3, 5))
             email_field = self._find_input(driver, By, 'email')
             password_field = self._find_input(driver, By, 'password')
@@ -119,6 +126,12 @@ class TGPGrantScraper(BaseScraper):
                 logger.warning("TGP: login button not found — continuing without login")
                 return
             login_btn.click()
+            try:
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                pass
             time.sleep(random.uniform(4, 7))
             self._logged_in = True
             logger.info("TGP: login submitted")
@@ -191,10 +204,17 @@ class TGPGrantScraper(BaseScraper):
             time.sleep(random.uniform(*DELAY_BETWEEN_PAGES))
 
             try:
-                driver.set_page_load_timeout(30)
+                driver.set_page_load_timeout(60)
                 logger.debug(f"TGP: loading {state_name} p{page}...")
                 driver.get(url)
-                time.sleep(random.uniform(2, 4))
+                try:
+                    from selenium.webdriver.support.ui import WebDriverWait
+                    WebDriverWait(driver, 30).until(
+                        lambda d: d.execute_script("return document.readyState") == "complete"
+                    )
+                except Exception:
+                    pass
+                time.sleep(random.uniform(4, 7))
                 self._dismiss_popups(driver)
             except Exception as exc:
                 logger.warning(f"TGP: page load failed {state_name} p{page}: {exc}")
@@ -239,9 +259,16 @@ class TGPGrantScraper(BaseScraper):
             return
 
         try:
-            time.sleep(random.uniform(1.5, 3.0))
+            time.sleep(random.uniform(2.0, 4.0))
             driver.get(detail_url)
-            time.sleep(random.uniform(2, 4))
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                pass
+            time.sleep(random.uniform(4, 7))
             dhtml = driver.page_source or ''
 
             elig = self._extract_eligibility_from_detail(dhtml)

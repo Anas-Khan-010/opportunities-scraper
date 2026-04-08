@@ -57,14 +57,24 @@ class NCeVPScraper(BaseScraper):
 
         time.sleep(random.uniform(*SELENIUM_DELAY_RANGE))
         driver.get(LISTING_URL)
-        time.sleep(random.uniform(3, 5))
 
         try:
-            WebDriverWait(driver, 20).until(
+            WebDriverWait(driver, 30).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except Exception:
+            logger.debug("NC eVP: readyState timeout on listing, continuing anyway")
+
+        time.sleep(random.uniform(4, 7))
+
+        try:
+            WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, '.entity-grid table tbody tr, table tbody tr'))
             )
         except Exception:
             logger.warning("NC eVP: timed out waiting for listing table")
+
+        time.sleep(random.uniform(2, 4))
 
         page = 1
         seen_urls = set()
@@ -189,7 +199,16 @@ class NCeVPScraper(BaseScraper):
         try:
             time.sleep(random.uniform(*DELAY_BETWEEN_DETAILS))
             driver.get(detail_url)
-            time.sleep(random.uniform(2, 4))
+
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                pass
+
+            time.sleep(random.uniform(4, 7))
 
             soup = self.parse_html(driver.page_source)
 
@@ -276,7 +295,14 @@ class NCeVPScraper(BaseScraper):
             for link in next_links:
                 if link.is_displayed():
                     link.click()
-                    time.sleep(random.uniform(2, 4))
+                    try:
+                        from selenium.webdriver.support.ui import WebDriverWait
+                        WebDriverWait(driver, 30).until(
+                            lambda d: d.execute_script("return document.readyState") == "complete"
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(random.uniform(3, 6))
                     return True
 
             return False

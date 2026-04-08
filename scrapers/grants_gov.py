@@ -80,7 +80,7 @@ class GrantsGovScraper(BaseScraper):
             options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
             self._driver = webdriver.Chrome(options=options)
-            self._driver.set_page_load_timeout(30)
+            self._driver.set_page_load_timeout(60)
             logger.info("Selenium Chrome driver initialized successfully")
             return True
         except WebDriverException as e:
@@ -335,7 +335,15 @@ class GrantsGovScraper(BaseScraper):
         try:
             self._driver.get(detail_url)
 
-            # Wait for main content to render
+            # Wait for the page to fully load (document.readyState == complete)
+            try:
+                WebDriverWait(self._driver, 30).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except TimeoutException:
+                logger.debug(f"readyState timeout for {detail_url}, continuing anyway")
+
+            # Wait for main content container to appear
             try:
                 WebDriverWait(self._driver, config.GRANTS_GOV_DETAIL_PAGE_TIMEOUT).until(
                     EC.presence_of_element_located(
@@ -346,8 +354,19 @@ class GrantsGovScraper(BaseScraper):
                 logger.warning(f"Detail page timed out: {detail_url}")
                 return None
 
-            # Give JS a bit more time to finish rendering
-            time.sleep(config.GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT)
+            # Wait for description/eligibility content to render (JS-heavy page)
+            try:
+                WebDriverWait(self._driver, 10).until(
+                    lambda d: any(
+                        kw in (d.page_source or '').lower()
+                        for kw in ['description:', 'eligible applicants:', 'award ceiling:']
+                    )
+                )
+            except TimeoutException:
+                logger.debug(f"Detail labels not found within extra wait: {detail_url}")
+
+            # Give JS extra time to finish rendering all dynamic content
+            time.sleep(config.GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT + 3)
 
             # Extract the full body text using BeautifulSoup to preserve <br> as newlines
             try:

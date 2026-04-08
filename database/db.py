@@ -50,8 +50,7 @@ class Database:
             opportunity_type TEXT DEFAULT NULL,
             posted_date TIMESTAMP,
             document_urls TEXT[],
-            scraped_at TIMESTAMP DEFAULT NOW(),
-            created_at TIMESTAMP DEFAULT NOW()
+            scraped_at TIMESTAMP DEFAULT NOW()
         );
 
         CREATE INDEX IF NOT EXISTS idx_source ON opportunities(source);

@@ -91,7 +91,6 @@ Each opportunity record contains **14 data fields** designed to capture the comp
 | `posted_date` | TIMESTAMP | When the opportunity was published |
 | `document_urls` | TEXT[] | Array of attachment / document download links |
 | `scraped_at` | TIMESTAMP | Last scrape timestamp |
-| `created_at` | TIMESTAMP | First insertion timestamp |
 
 The `ON CONFLICT (source_url) DO UPDATE SET ... COALESCE(...)` upsert strategy means re-running scrapers **enriches** existing records — new data fills previously empty fields without overwriting existing values.
 
@@ -165,8 +164,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
     opportunity_type  TEXT DEFAULT NULL,
     posted_date       TIMESTAMP,
     document_urls     TEXT[],
-    scraped_at        TIMESTAMP DEFAULT NOW(),
-    created_at        TIMESTAMP DEFAULT NOW()
+    scraped_at        TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_source           ON opportunities(source);

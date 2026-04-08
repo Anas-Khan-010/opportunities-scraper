@@ -188,10 +188,12 @@ class SAMGovScraper(BaseScraper):
             if eligibility == 'NONE' or eligibility == '':
                 eligibility = 'Unrestricted / No Set-Aside'
                 
-            # Description — SAM.gov returns a secondary API URL for full text.
-            # Skipped to stay within the strict per-run request cap; the listing
-            # data (title, org, dates, eligibility) is sufficient.
+            # Fetch full description from SAM.gov's secondary description API
+            desc_link = opp_data.get('descriptionLink')
             description = None
+            if desc_link:
+                time.sleep(2)
+                description = self._fetch_description(desc_link)
                 
             # Auto-categorize if needed
             if category and category.lower() in ['solicitation', 'presolicitation', 'sources sought', 'award notice']:

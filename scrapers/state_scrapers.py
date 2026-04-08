@@ -125,7 +125,7 @@ class _SeleniumDriverManager:
                 use_subprocess=True,
                 version_main=version_main,
             )
-            cls._driver.set_page_load_timeout(30)
+            cls._driver.set_page_load_timeout(45)
             logger.info("Shared Selenium driver initialized (undetected-chromedriver)")
             return cls._driver
         except Exception as e:
@@ -584,16 +584,23 @@ class StateSeleniumScraper(BaseScraper):
         time.sleep(delay)
 
         try:
-            driver.set_page_load_timeout(30)
+            driver.set_page_load_timeout(60)
             driver.get(self.portal_url)
         except WebDriverException as e:
             logger.error(f"{self.state_name}: page load failed - {e}")
             return False
 
         try:
+            WebDriverWait(driver, 30).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except TimeoutException:
+            logger.debug(f"{self.state_name}: readyState timeout, continuing anyway")
+
+        try:
             wait_selectors = [s.strip() for s in self.wait_selector.split(',')]
             css = ', '.join(wait_selectors)
-            WebDriverWait(driver, 20).until(
+            WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, css))
             )
         except TimeoutException:
@@ -601,7 +608,7 @@ class StateSeleniumScraper(BaseScraper):
                 f"{self.state_name}: timed out waiting for content at {self.portal_url}"
             )
 
-        time.sleep(random.uniform(2, 4))
+        time.sleep(random.uniform(4, 7))
 
         soup = self.parse_html(driver.page_source)
         self._extract_opportunities(soup)
