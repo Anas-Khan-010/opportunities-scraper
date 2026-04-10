@@ -37,6 +37,36 @@ class RFPMartScraper(BaseScraper):
     def __init__(self):
         super().__init__('RFPMart')
 
+    def _parse_composite_title(self, raw_title):
+        """Parse '{ID} - {Location} - {Title} - Deadline {Date}' into components.
+
+        Returns (opp_number, clean_title, location).
+        """
+        if not raw_title:
+            return None, raw_title, None
+
+        remaining = raw_title
+
+        id_match = re.match(
+            r'^([A-Z][\w]*(?:-[A-Z]+)*-\d+)\s*-\s*', remaining, re.I,
+        )
+        if not id_match:
+            return None, raw_title, None
+
+        opp_number = id_match.group(1)
+        remaining = remaining[id_match.end():]
+
+        remaining = re.sub(r'\s*-\s*Deadline\s.+$', '', remaining, flags=re.I)
+
+        location = None
+        loc_match = re.match(r'^(USA\s*(?:\([^)]*\))?)\s*-\s*', remaining, re.I)
+        if loc_match:
+            location = clean_text(loc_match.group(1))
+            remaining = remaining[loc_match.end():]
+
+        title = clean_text(remaining) or raw_title
+        return opp_number, title, location
+
     def scrape(self):
         logger.info(f"Starting RFPMart scraper (max {MAX_PAGES} pages)...")
 
@@ -104,12 +134,7 @@ class RFPMartScraper(BaseScraper):
             return None
         seen_urls.add(source_url)
 
-        opp_number = None
-        title = title_raw
-        opp_match = re.match(r'^(US-\w+-\d+)\s*-\s*(.+?)(?:\s*-\s*Deadline\s.+)?$', title_raw, re.I)
-        if opp_match:
-            opp_number = opp_match.group(1)
-            title = clean_text(opp_match.group(2))
+        opp_number, title, parsed_location = self._parse_composite_title(title_raw)
 
         posted_date = None
         post_span = li.select_one('span.post-date')
@@ -131,7 +156,7 @@ class RFPMartScraper(BaseScraper):
             'funding_amount': None,
             'deadline': deadline,
             'category': category,
-            'location': 'United States',
+            'location': parsed_location or 'United States',
             'source': 'RFPMart',
             'source_url': source_url,
             'opportunity_number': opp_number,
@@ -160,9 +185,20 @@ class RFPMartScraper(BaseScraper):
             logger.debug(f"RFPMart: detail parse error for {detail_url}: {exc}")
 
     def _extract_detail_fields(self, container, opp):
+        h2 = container.find('h2')
+        if h2:
+            h2_text = clean_text(h2.get_text())
+            if h2_text:
+                num, title, _ = self._parse_composite_title(h2_text)
+                if title:
+                    opp['title'] = title
+                if num and not opp.get('opportunity_number'):
+                    opp['opportunity_number'] = num
+
         desc_parts = []
         scope_parts = []
         in_scope = False
+        in_eligibility = False
 
         for p in container.find_all('p'):
             text = p.get_text(separator=' ', strip=True)
@@ -234,8 +270,25 @@ class RFPMartScraper(BaseScraper):
             if 'Cost to Download' in text:
                 continue
 
+            if 'Budget' in text and '[*]' in text:
+                raw = text.split(':', 1)[1].strip() if ':' in text else ''
+                if raw and not opp.get('funding_amount'):
+                    opp['funding_amount'] = clean_text(raw)
+                continue
+
+            if 'Eligibility' in text and '[*]' in text:
+                in_eligibility = True
+                continue
+
             if 'Scope of Service' in text:
                 in_scope = True
+                continue
+
+            if in_eligibility:
+                if not opp.get('eligibility'):
+                    raw_elig = text.strip().strip('-•*').strip().rstrip(';').strip()
+                    opp['eligibility'] = clean_text(raw_elig)
+                in_eligibility = False
                 continue
 
             if in_scope:
@@ -243,6 +296,26 @@ class RFPMartScraper(BaseScraper):
                 in_scope = False
             elif len(text) > 50:
                 desc_parts.append(text)
+
+        if desc_parts and not opp.get('organization'):
+            first_desc = desc_parts[0]
+            org = None
+            org_match = re.match(
+                r'^(.+?)\s*[;.]\s*\w+.*?\bbased\s+organization',
+                first_desc, re.I,
+            )
+            if org_match:
+                org = clean_text(org_match.group(1))
+            else:
+                fallback = re.match(
+                    r'^(.+?\s+located\s+in\s+\w[\w\s,]*?)\s+'
+                    r'(?:looking\s+for|seeking|is\s+looking|is\s+seeking)',
+                    first_desc, re.I,
+                )
+                if fallback:
+                    org = clean_text(fallback.group(1))
+            if org:
+                opp['organization'] = org
 
         description = ''
         if desc_parts:
