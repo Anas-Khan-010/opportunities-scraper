@@ -67,6 +67,8 @@ class GovContractsRFPScraper(BaseScraper):
             'Accept': 'text/html,application/xhtml+xml',
             'Accept-Language': 'en-US,en;q=0.9',
         })
+        self._max_new_per_state = config.GOVCONTRACTS_MAX_NEW_PER_STATE
+        self._max_new = self._max_new_per_state * len(STATES)
 
     def scrape(self):
         logger.info("Starting GovernmentContracts.us RFP scraper (all 50 states)...")
@@ -85,6 +87,7 @@ class GovContractsRFPScraper(BaseScraper):
 
     def _scrape_state(self, abbr, state_name):
         count_before = len(self.opportunities)
+        new_before = self._new_count
         seen_ids = set()
 
         for page in range(1, MAX_PAGES_PER_STATE + 1):
@@ -101,13 +104,17 @@ class GovContractsRFPScraper(BaseScraper):
             if not page_items:
                 break
 
+            state_done = False
             for opp in page_items:
                 self._enrich_from_detail(opp)
                 self.add_opportunity(opp)
+                if self._new_count - new_before >= self._max_new_per_state:
+                    state_done = True
+                    break
                 if self.reached_limit():
                     break
 
-            if self.reached_limit() or not self._has_next_page(resp.text, page):
+            if state_done or self.reached_limit() or not self._has_next_page(resp.text, page):
                 break
 
         added = len(self.opportunities) - count_before

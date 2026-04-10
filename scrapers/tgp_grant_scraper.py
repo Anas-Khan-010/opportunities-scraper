@@ -68,6 +68,8 @@ class TGPGrantScraper(BaseScraper):
         self.email = config.TGP_EMAIL
         self.password = config.TGP_PASSWORD
         self._logged_in = False
+        self._max_new_per_state = config.TGP_MAX_NEW_PER_STATE
+        self._max_new = self._max_new_per_state * len(TGP_STATE_IDS)
 
     def scrape(self):
         logger.info("Starting TGP scraper (all 50 states)...")
@@ -197,6 +199,7 @@ class TGPGrantScraper(BaseScraper):
     def _scrape_state(self, driver, state_id, state_name):
         page = 1
         count_before = len(self.opportunities)
+        new_before = self._new_count
         seen_ids = set()
 
         while page <= MAX_PAGES_PER_STATE:
@@ -226,13 +229,17 @@ class TGPGrantScraper(BaseScraper):
             if not new_grants:
                 break
 
+            state_done = False
             for grant in new_grants:
                 self._enrich_from_detail(driver, grant)
                 self.add_opportunity(grant)
+                if self._new_count - new_before >= self._max_new_per_state:
+                    state_done = True
+                    break
                 if self.reached_limit():
                     break
 
-            if self.reached_limit():
+            if state_done or self.reached_limit():
                 break
 
             page += 1

@@ -57,6 +57,7 @@ class Config:
     # ── 5. The Grant Portal (TGP) ─────────────────────────────────────
     TGP_BASE_URL = os.getenv('TGP_BASE_URL', 'https://www.thegrantportal.com')
     TGP_MAX_PAGES_PER_STATE = int(os.getenv('TGP_MAX_PAGES_PER_STATE', '10'))
+    TGP_MAX_NEW_PER_STATE = int(os.getenv('TGP_MAX_NEW_PER_STATE', '10'))
     TGP_EMAIL = os.getenv('TGP_EMAIL', '')
     TGP_PASSWORD = os.getenv('TGP_PASSWORD', '')
 
@@ -73,6 +74,7 @@ class Config:
     # ── 8. GovernmentContracts.us ──────────────────────────────────────
     GOVCONTRACTS_BASE_URL = os.getenv('GOVCONTRACTS_BASE_URL', 'https://www.governmentcontracts.us')
     GOVCONTRACTS_MAX_PAGES_PER_STATE = int(os.getenv('GOVCONTRACTS_MAX_PAGES_PER_STATE', '5'))
+    GOVCONTRACTS_MAX_NEW_PER_STATE = int(os.getenv('GOVCONTRACTS_MAX_NEW_PER_STATE', '10'))
 
     # ── 9. RFPMart ────────────────────────────────────────────────────
     RFPMART_BASE_URL = os.getenv('RFPMART_BASE_URL', 'https://www.rfpmart.com')
