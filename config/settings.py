@@ -31,6 +31,7 @@ class Config:
     # ── 1. Grants.gov ──────────────────────────────────────────────────
     GRANTS_GOV_BASE_URL = os.getenv('GRANTS_GOV_BASE_URL', 'https://www.grants.gov')
     GRANTS_GOV_API_URL = os.getenv('GRANTS_GOV_API_URL', 'https://api.grants.gov/v1/api/search2')
+    GRANTS_GOV_DETAIL_API_URL = os.getenv('GRANTS_GOV_DETAIL_API_URL', 'https://api.grants.gov/v1/api/fetchOpportunity')
     GRANTS_GOV_DETAIL_PAGE_TIMEOUT = int(os.getenv('GRANTS_GOV_DETAIL_PAGE_TIMEOUT', '15'))
     GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT = int(os.getenv('GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT', '3'))
 

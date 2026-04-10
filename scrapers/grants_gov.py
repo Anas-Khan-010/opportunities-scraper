@@ -1,5 +1,6 @@
 import re
 import time
+import random
 from datetime import datetime
 from scrapers.base_scraper import BaseScraper
 from config.settings import config
@@ -7,7 +8,7 @@ from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
 from database.db import db
 
-# Selenium imports
+# Selenium imports (only used as fallback)
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -22,19 +23,18 @@ class GrantsGovScraper(BaseScraper):
     """
     Robust scraper for Grants.gov — Federal grant opportunities.
     
-    Architecture:
+    Architecture (three-tier enrichment):
         1. search2 API (POST) → paginated keyword search → basic fields
-        2. Selenium (per opportunity) → JS-rendered detail page → description, 
-           eligibility, funding, document links
-        3. Merge both sources → validate → return opportunities
+        2. fetchOpportunity API (POST) → full detail via REST (no browser)
+           → description, eligibility, funding, deadline, documents
+        3. Selenium fallback → only if the detail API fails for an opportunity
+        4. Merge all sources → validate → return opportunities
     
-    Graceful degradation:
-        - If Selenium fails for ANY reason, the opportunity is still returned
-          with API-only data (description/eligibility will be empty).
-        - Each opportunity is isolated — one failure never crashes the batch.
+    The detail API (tier 2) requires no authentication and works on any
+    server without Chrome/Selenium, making it reliable on headless VPS.
     """
 
-    # Labels to extract from detail page text (case-insensitive matching)
+    # Labels to extract from Selenium detail page text (case-insensitive)
     DETAIL_LABELS = {
         'description': ['Description:'],
         'eligibility': [
@@ -60,34 +60,65 @@ class GrantsGovScraper(BaseScraper):
         super().__init__('Grants.gov')
         self.base_url = config.GRANTS_GOV_BASE_URL
         self.api_url = config.GRANTS_GOV_API_URL
+        self.detail_api_url = config.GRANTS_GOV_DETAIL_API_URL
         self._driver = None
 
     # ─── Selenium Lifecycle ───────────────────────────────────────────
 
     def _init_driver(self):
-        """Initialize a headless Chrome driver. Returns True on success."""
+        """Initialize a headless Chrome driver with stealth hardening. Returns True on success."""
         if self._driver is not None:
             return True
         try:
             options = Options()
-            options.add_argument('--headless')
+            options.add_argument('--headless=new')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
             options.add_argument('--window-size=1920,1080')
-            # Suppress noisy Chrome logs
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('--disable-background-timer-throttling')
+            options.add_argument('--disable-backgrounding-occluded-windows')
+            options.add_argument('--disable-renderer-backgrounding')
+            options.add_argument('--no-first-run')
+            options.add_argument('--no-default-browser-check')
+            options.add_argument('--lang=en-US,en')
+            options.add_argument(f'--user-agent={config.USER_AGENTS[0]}')
             options.add_argument('--log-level=3')
-            options.add_experimental_option('excludeSwitches', ['enable-logging'])
+            options.add_experimental_option(
+                'excludeSwitches', ['enable-automation', 'enable-logging']
+            )
+            options.add_experimental_option('useAutomationExtension', False)
 
             self._driver = webdriver.Chrome(options=options)
             self._driver.set_page_load_timeout(60)
-            logger.info("Selenium Chrome driver initialized successfully")
+            self._apply_stealth_patches()
+            logger.info("Selenium Chrome driver initialized successfully (stealth mode)")
             return True
         except WebDriverException as e:
             logger.error(f"Failed to initialize Chrome driver: {e}")
-            logger.warning("Continuing in API-only mode (no detail page scraping)")
+            logger.warning("Selenium fallback disabled")
             self._driver = None
             return False
+
+    def _apply_stealth_patches(self):
+        """Inject JS to hide automation markers from page scripts."""
+        if not self._driver:
+            return
+        try:
+            self._driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": (
+                        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                        "Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});"
+                        "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});"
+                        "window.chrome=window.chrome||{runtime:{}};"
+                    )
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Stealth patch skipped: {e}")
 
     def _quit_driver(self):
         """Safely close the Selenium driver."""
@@ -108,8 +139,7 @@ class GrantsGovScraper(BaseScraper):
         
         Args:
             keywords: List of search keywords, or a single string.
-                      Defaults to ["health", "education", "technology", 
-                      "environment", "community"].
+                      Defaults to a broad set of 19 keywords.
             max_pages: Maximum number of API pages to fetch per keyword.
                        Each page returns up to 25 results.
         
@@ -130,16 +160,13 @@ class GrantsGovScraper(BaseScraper):
                     f"{len(keywords)} keyword(s), max {max_pages} pages each")
         logger.info(f"\n🚀 Starting {self.source_name} scraper with {len(keywords)} keyword(s), max {max_pages} pages each")
 
-        # Initialize Selenium once for all detail fetches
-        selenium_available = self._init_driver()
-        if not selenium_available:
-            logger.warning("Detail page scraping disabled — API-only mode")
-            logger.info("⚠️ Detail page scraping disabled — running in API-only mode")
-        else:
-            logger.info("✅ Chrome driver initialized")
+        # Selenium is only initialized on demand (if detail API fails)
+        selenium_available = False
 
-        seen_ids = set()  # Track IDs across keywords to avoid duplicate processing
+        seen_ids = set()
         keyword_results = {}
+        api_detail_hits = 0
+        api_detail_misses = 0
 
         try:
             for keyword in keywords:
@@ -154,8 +181,7 @@ class GrantsGovScraper(BaseScraper):
                 for page in range(max_pages):
                     if skip_keyword:
                         break
-                        
-                    # Step 1: Fetch a page of results from the API
+
                     api_results = self._search_api(keyword, page)
 
                     if api_results is None:
@@ -171,38 +197,47 @@ class GrantsGovScraper(BaseScraper):
                     for opp_data in api_results:
                         opp_id = opp_data.get('id')
 
-                        # Skip if already processed in this current run
                         if opp_id in seen_ids:
                             continue
                         seen_ids.add(opp_id)
 
-                        # Step 2: Parse API fields into opportunity dict
                         opportunity = self._parse_api_result(opp_data)
                         if opportunity is None:
                             continue
 
-                        # DB Deduplication Check: if it already exists in Supabase, skip Selenium
                         if db.opportunity_exists(opportunity['source_url']):
                             sequential_duplicates += 1
                             logger.info(f"  ⏭️  Skipped DB duplicate: {opportunity['title'][:50]}...")
-                            
-                            # If we hit 10 duplicates in a row, assume everything older is also a duplicate
                             if sequential_duplicates >= 10:
                                 logger.info(f"  🛑 Hit 10 duplicates in a row. Skipping rest of keyword '{keyword}'.")
                                 skip_keyword = True
                                 break
                             continue
-                        
-                        # Not a duplicate, reset the duplicate counter
+
                         sequential_duplicates = 0
 
-                        # Step 3: Enrich with detail page (Selenium)
-                        if selenium_available:
-                            details = self._fetch_detail_page(opportunity['source_url'])
+                        # ── Enrichment: API first, Selenium fallback ──
+                        enriched = False
+                        if opp_id:
+                            details = self._fetch_detail_api(opp_id)
                             if details:
                                 opportunity = self._merge_details(opportunity, details)
+                                enriched = True
+                                api_detail_hits += 1
 
-                        # Step 4: Auto-categorize only if no official category was found
+                        if not enriched:
+                            api_detail_misses += 1
+                            if not selenium_available:
+                                selenium_available = self._init_driver()
+                            if selenium_available:
+                                details = self._fetch_detail_page(opportunity['source_url'])
+                                if details:
+                                    opportunity = self._merge_details(opportunity, details)
+                                    enriched = True
+
+                        if not enriched:
+                            logger.warning(f"  ⚠️ No enrichment for: {opportunity['title'][:50]}...")
+
                         if not opportunity.get('category'):
                             opportunity['category'] = categorize_opportunity(
                                 opportunity['title'] or '',
@@ -219,14 +254,17 @@ class GrantsGovScraper(BaseScraper):
                             break
 
                     logger.info(f"📄 Page {page + 1} complete. Total for '{keyword}' so far: {keyword_count}")
-                    
+
                 keyword_results[keyword] = keyword_count
                 logger.info(f"🏁 Keyword '{keyword}' complete. Found {keyword_count} new opportunities.")
 
         finally:
-            # Always clean up Selenium
             self._quit_driver()
 
+        logger.info(
+            f"📊 Detail enrichment stats: API hits={api_detail_hits}, "
+            f"API misses={api_detail_misses}"
+        )
         self.log_summary()
         return self.opportunities
 
@@ -234,7 +272,7 @@ class GrantsGovScraper(BaseScraper):
         """Required by BaseScraper. Delegates to _parse_api_result."""
         return self._parse_api_result(element)
 
-    # ─── API Layer ────────────────────────────────────────────────────
+    # ─── Search API Layer ─────────────────────────────────────────────
 
     def _search_api(self, keyword, page):
         """
@@ -269,7 +307,6 @@ class GrantsGovScraper(BaseScraper):
             return opp_hits
 
         except ValueError as e:
-            # JSON decode error
             logger.error(f"Invalid JSON response from API (keyword='{keyword}', "
                         f"page={page + 1}): {e}")
             return None
@@ -280,14 +317,14 @@ class GrantsGovScraper(BaseScraper):
 
     def _parse_api_result(self, opp_data):
         """
-        Parse one opportunity from API response into our standard dict.
+        Parse one opportunity from search API response into our standard dict.
         
         Returns dict or None if parsing fails.
         """
         try:
             opp_id = opp_data.get('id')
             title = clean_text(opp_data.get('title', ''))
-            
+
             if not title or not opp_id:
                 logger.warning(f"Skipping opportunity with missing title or ID: {opp_data}")
                 return None
@@ -319,15 +356,210 @@ class GrantsGovScraper(BaseScraper):
             logger.error(f"Error parsing API result: {e} | Data: {opp_data}")
             return None
 
-    # ─── Selenium Detail Page Layer ───────────────────────────────────
+    # ─── Detail API Layer (primary enrichment — no Selenium) ──────────
+
+    _DETAIL_API_MAX_RETRIES = 4
+    _DETAIL_API_BACKOFF_BASE = 3  # seconds
+
+    def _fetch_detail_api(self, opportunity_id):
+        """
+        Fetch full opportunity details from the Grants.gov fetchOpportunity API.
+        
+        This is a simple POST request — no browser, no Selenium, no JS rendering.
+        Works identically on any server (local, Chris's Webmin, CI, etc.).
+        
+        Includes 429/rate-limit handling with exponential backoff and
+        Retry-After header respect.
+        
+        Returns:
+            Dict with detail fields, or None on failure.
+        """
+        payload = {"opportunityId": int(opportunity_id)}
+
+        for attempt in range(self._DETAIL_API_MAX_RETRIES):
+            try:
+                # Polite delay between detail API calls to avoid hammering
+                time.sleep(random.uniform(1.0, 2.5))
+
+                response = self.session.post(
+                    self.detail_api_url, json=payload, timeout=30
+                )
+
+                # Handle rate limiting explicitly
+                if response.status_code == 429:
+                    retry_after = response.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            wait_secs = int(retry_after)
+                        except ValueError:
+                            wait_secs = self._DETAIL_API_BACKOFF_BASE * (2 ** attempt)
+                    else:
+                        wait_secs = self._DETAIL_API_BACKOFF_BASE * (2 ** attempt)
+                    wait_secs = min(wait_secs, 120)
+                    logger.warning(
+                        f"Rate limited (429) on fetchOpportunity ID {opportunity_id}, "
+                        f"waiting {wait_secs}s (attempt {attempt + 1}/{self._DETAIL_API_MAX_RETRIES})"
+                    )
+                    time.sleep(wait_secs)
+                    continue
+
+                if response.status_code == 503:
+                    wait_secs = self._DETAIL_API_BACKOFF_BASE * (2 ** attempt)
+                    logger.warning(
+                        f"Service unavailable (503) on fetchOpportunity ID {opportunity_id}, "
+                        f"waiting {wait_secs}s (attempt {attempt + 1}/{self._DETAIL_API_MAX_RETRIES})"
+                    )
+                    time.sleep(wait_secs)
+                    continue
+
+                response.raise_for_status()
+
+                resp_json = response.json()
+                if resp_json.get('errorcode') and resp_json['errorcode'] != 0:
+                    logger.warning(
+                        f"fetchOpportunity error for ID {opportunity_id}: "
+                        f"{resp_json.get('msg', 'unknown')}"
+                    )
+                    return None
+
+                data = resp_json.get('data', {})
+                if not data:
+                    return None
+
+                return self._parse_detail_api_response(data)
+
+            except ValueError as e:
+                logger.warning(f"fetchOpportunity JSON decode error for ID {opportunity_id}: {e}")
+                return None
+            except Exception as e:
+                wait_secs = self._DETAIL_API_BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    f"fetchOpportunity attempt {attempt + 1} failed for ID {opportunity_id}: {e}, "
+                    f"retrying in {wait_secs}s"
+                )
+                if attempt < self._DETAIL_API_MAX_RETRIES - 1:
+                    time.sleep(wait_secs)
+                else:
+                    logger.error(f"fetchOpportunity gave up on ID {opportunity_id} after {self._DETAIL_API_MAX_RETRIES} attempts")
+                    return None
+
+        logger.error(f"fetchOpportunity exhausted retries for ID {opportunity_id}")
+        return None
+
+    def _parse_detail_api_response(self, data):
+        """
+        Extract detail fields from the fetchOpportunity API response.
+        
+        Opportunities can be either "synopsis" or "forecast" type.
+        The detail data lives under data.synopsis or data.forecast respectively,
+        with slightly different field names for description.
+        """
+        details = {}
+
+        # Pick the right detail block — synopsis or forecast
+        synopsis = data.get('synopsis') or {}
+        forecast = data.get('forecast') or {}
+        detail_block = synopsis or forecast
+
+        if not detail_block:
+            return None
+
+        # Description — synopsis uses synopsisDesc, forecast uses forecastDesc
+        desc = (
+            detail_block.get('synopsisDesc')
+            or detail_block.get('forecastDesc')
+            or ''
+        )
+        if desc:
+            desc = self._strip_html(desc)
+            if desc and len(desc) >= 10:
+                details['description'] = clean_text(desc)
+
+        # Eligibility — combine applicant type labels + free-text eligibility
+        eligibility_parts = []
+        applicant_types = detail_block.get('applicantTypes', [])
+        if applicant_types:
+            for at in applicant_types:
+                desc_text = at.get('description', '')
+                if desc_text:
+                    eligibility_parts.append(desc_text)
+
+        additional_elig = detail_block.get('applicantEligibilityDesc', '')
+        if additional_elig:
+            additional_elig = self._strip_html(additional_elig)
+            if additional_elig:
+                eligibility_parts.append(additional_elig)
+
+        if eligibility_parts:
+            details['eligibility'] = '\n'.join(eligibility_parts)
+
+        # Funding amount — prefer ceiling, fall back to floor
+        ceiling = detail_block.get('awardCeiling') or detail_block.get('awardCeilingFormatted')
+        floor = detail_block.get('awardFloor') or detail_block.get('awardFloorFormatted')
+        funding_val = ceiling or floor
+        if funding_val and str(funding_val) != '0':
+            details['funding_amount'] = self._clean_funding(str(funding_val))
+
+        # Deadline — synopsis uses responseDate, forecast uses estApplicationResponseDate
+        close_date_str = (
+            detail_block.get('responseDateDesc')
+            or detail_block.get('responseDate')
+            or detail_block.get('estApplicationResponseDate')
+            or detail_block.get('estApplicationResponseDateDesc')
+        )
+        if close_date_str:
+            parsed_deadline = parse_date(close_date_str)
+            if parsed_deadline:
+                details['deadline'] = parsed_deadline
+
+        # Category
+        opp_category = data.get('opportunityCategory', {})
+        cat_desc = opp_category.get('description', '')
+        if cat_desc:
+            details['category'] = clean_text(cat_desc)
+        else:
+            funding_cats = detail_block.get('fundingActivityCategories', [])
+            if funding_cats:
+                cat_names = [fc.get('description', '') for fc in funding_cats if fc.get('description')]
+                if cat_names:
+                    details['category'] = ', '.join(cat_names)
+
+        # Document URLs from attachment folders
+        doc_urls = []
+        for folder in data.get('synopsisAttachmentFolders', []):
+            for att in folder.get('synopsisAttachments', []):
+                filename = att.get('fileName', '')
+                att_id = att.get('id')
+                if filename and att_id:
+                    doc_url = (
+                        f"{self.base_url}/grantsws/rest/opportunity/att/download/"
+                        f"{att_id}"
+                    )
+                    doc_urls.append(doc_url)
+        if doc_urls:
+            details['document_urls'] = doc_urls
+
+        return details if details else None
+
+    def _strip_html(self, text):
+        """Remove HTML tags and entities from a string and clean up whitespace."""
+        if not text:
+            return ''
+        import html
+        cleaned = re.sub(r'<[^>]+>', ' ', text)
+        cleaned = html.unescape(cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        return cleaned
+
+    # ─── Selenium Detail Page Layer (fallback only) ───────────────────
 
     def _fetch_detail_page(self, detail_url):
         """
         Fetch and parse a Grants.gov detail page using Selenium.
+        Only used as fallback when the fetchOpportunity API fails.
         
         Returns:
             Dict with extracted detail fields, or None on failure.
-            The dict may contain only SOME fields if parsing is partial.
         """
         if self._driver is None:
             return None
@@ -335,7 +567,6 @@ class GrantsGovScraper(BaseScraper):
         try:
             self._driver.get(detail_url)
 
-            # Wait for the page to fully load (document.readyState == complete)
             try:
                 WebDriverWait(self._driver, 30).until(
                     lambda d: d.execute_script("return document.readyState") == "complete"
@@ -343,7 +574,6 @@ class GrantsGovScraper(BaseScraper):
             except TimeoutException:
                 logger.debug(f"readyState timeout for {detail_url}, continuing anyway")
 
-            # Wait for main content container to appear
             try:
                 WebDriverWait(self._driver, config.GRANTS_GOV_DETAIL_PAGE_TIMEOUT).until(
                     EC.presence_of_element_located(
@@ -351,26 +581,33 @@ class GrantsGovScraper(BaseScraper):
                     )
                 )
             except TimeoutException:
-                logger.warning(f"Detail page timed out: {detail_url}")
+                logger.warning(f"Detail page timed out waiting for container: {detail_url}")
                 return None
 
-            # Wait for description/eligibility content to render (JS-heavy page)
+            detail_label_timeout = max(15, config.GRANTS_GOV_DETAIL_PAGE_TIMEOUT)
+            labels_found = False
             try:
-                WebDriverWait(self._driver, 10).until(
+                WebDriverWait(self._driver, detail_label_timeout).until(
                     lambda d: any(
                         kw in (d.page_source or '').lower()
                         for kw in ['description:', 'eligible applicants:', 'award ceiling:']
                     )
                 )
+                labels_found = True
             except TimeoutException:
-                logger.debug(f"Detail labels not found within extra wait: {detail_url}")
+                logger.warning(
+                    f"Detail labels never appeared after {detail_label_timeout}s: {detail_url} "
+                    f"— page may be blocked or JS failed to render"
+                )
 
-            # Give JS extra time to finish rendering all dynamic content
-            time.sleep(config.GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT + 3)
+            render_wait = config.GRANTS_GOV_DETAIL_PAGE_RENDER_WAIT + 3
+            if not labels_found:
+                render_wait += 5
+            time.sleep(render_wait)
 
-            # Extract the full body text using BeautifulSoup to preserve <br> as newlines
+            page_source = self._driver.page_source or ''
             try:
-                soup = self.parse_html(self._driver.page_source)
+                soup = self.parse_html(page_source)
                 if soup and soup.body:
                     page_text = soup.body.get_text(separator='\n', strip=True)
                 else:
@@ -380,13 +617,19 @@ class GrantsGovScraper(BaseScraper):
                 return None
 
             if not page_text or len(page_text) < 100:
-                logger.warning(f"Detail page appears empty: {detail_url}")
+                logger.warning(f"Detail page appears empty ({len(page_text)} chars): {detail_url}")
+                snippet = page_source[:500] if page_source else '(no source)'
+                logger.debug(f"Page source snippet: {snippet}")
                 return None
 
-            # Parse the text into structured fields
             details = self._parse_detail_text(page_text)
 
-            # Also try to extract document/attachment URLs from the page source
+            if not details.get('description') and not details.get('eligibility'):
+                logger.warning(
+                    f"Parsed detail page but got no description/eligibility: {detail_url} "
+                    f"(page_text length={len(page_text)})"
+                )
+
             doc_urls = self._extract_document_urls()
             if doc_urls:
                 details['document_urls'] = doc_urls
@@ -398,7 +641,6 @@ class GrantsGovScraper(BaseScraper):
             return None
         except WebDriverException as e:
             logger.error(f"Selenium error on detail page {detail_url}: {e}")
-            # Attempt to recover the driver for next opportunity
             self._recover_driver()
             return None
         except Exception as e:
@@ -414,9 +656,6 @@ class GrantsGovScraper(BaseScraper):
             Value text here
         or:
             Label: Value text here
-        
-        We extract values by finding known label strings and taking
-        the text that follows them.
         """
         details = {}
         lines = page_text.split('\n')
@@ -424,7 +663,6 @@ class GrantsGovScraper(BaseScraper):
         for field_name, label_options in self.DETAIL_LABELS.items():
             value = self._find_label_value(lines, label_options)
             if value:
-                # For funding, try to format as a clean dollar amount
                 if field_name == 'funding_amount':
                     details[field_name] = self._clean_funding(value)
                 elif field_name == 'deadline':
@@ -448,20 +686,16 @@ class GrantsGovScraper(BaseScraper):
         """
         for label in label_options:
             label_lower = label.lower().rstrip(':')
-            
+
             for i, line in enumerate(lines):
                 stripped = line.strip()
                 stripped_lower = stripped.lower()
 
-                # Check if this line contains the label
                 if label_lower not in stripped_lower:
                     continue
 
-                # Format 1: "Label: Value" on same line
-                # Find the label text and take everything after it
                 label_pos = stripped_lower.find(label_lower)
                 after_label = stripped[label_pos + len(label_lower):].strip()
-                # Remove leading colon if present
                 if after_label.startswith(':'):
                     after_label = after_label[1:].strip()
 
@@ -469,18 +703,14 @@ class GrantsGovScraper(BaseScraper):
                 if after_label and self._is_valid_value(after_label):
                     value_parts.append(after_label)
 
-                # Format 2: Value is on the next non-empty line(s) (or continues from Format 1)
                 for j in range(i + 1, min(i + 40, len(lines))):
                     next_line = lines[j].strip()
                     if not next_line:
                         if value_parts:
-                            break  # End of value block
-                        continue  # Skip empty lines before value
-                    
-                    # Stop if we hit another known label
+                            break
+                        continue
                     if self._is_known_label(next_line):
                         break
-                    
                     value_parts.append(next_line)
 
                 if value_parts:
@@ -494,52 +724,41 @@ class GrantsGovScraper(BaseScraper):
         all_labels = []
         for labels in self.DETAIL_LABELS.values():
             all_labels.extend(labels)
-        
-        # Also check for common section headers
+
         section_headers = [
             'eligibility', 'additional information', 'agency name',
             'description', 'grantor contact', 'link to additional',
             'version', 'posted date', 'last updated', 'archive date',
             'award ceiling', 'award floor', 'estimated total',
-            'category explanation', 'expected number of awards', 
+            'category explanation', 'expected number of awards',
             'assistance listings', 'cost sharing or matching requirements',
             'funding instrument type'
         ]
         all_labels.extend(section_headers)
-        
+
         for label in all_labels:
             if text_lower.startswith(label.lower().rstrip(':')):
                 return True
         return False
 
     def _is_valid_value(self, text):
-        """
-        Check if extracted text is a valid value (not garbage/fragment).
-        
-        Rejects:
-            - Text shorter than 5 chars
-            - Text that is mostly punctuation/quotes
-            - Text that doesn't contain any alphanumeric content
-        """
+        """Check if extracted text is a valid value (not garbage/fragment)."""
         if not text or len(text) < 5:
             return False
-        # Count alphanumeric characters
         alnum_count = sum(1 for c in text if c.isalnum())
         if alnum_count < 3:
             return False
-        # Reject if it starts with a quote or closing paren (likely a fragment)
         if text[0] in '"\')}]':
             return False
         return True
 
     def _extract_document_urls(self):
-        """Extract document/attachment URLs from the current page."""
+        """Extract document/attachment URLs from the current Selenium page."""
         try:
             links = self._driver.find_elements(By.CSS_SELECTOR, 'a[href]')
             doc_urls = []
             for link in links:
                 href = link.get_attribute('href') or ''
-                # Look for PDF, document, or attachment links
                 if any(ext in href.lower() for ext in ['.pdf', '.doc', '.docx', '/attachment']):
                     if href not in doc_urls:
                         doc_urls.append(href)
@@ -556,24 +775,20 @@ class GrantsGovScraper(BaseScraper):
         """
         if not value:
             return None
-        
+
         value = value.strip()
-        
-        # If it already has a $ sign, clean up spacing
+
         if '$' in value:
-            # Remove spaces between $ and numbers: "$ 300,000" -> "$300,000"
             value = re.sub(r'\$\s+', '$', value)
             return value
-        
-        # If it's a plain number, format it
+
         try:
-            # Remove commas and try to parse
             num = float(value.replace(',', ''))
             if num >= 1:
                 return f"${num:,.0f}"
         except ValueError:
             pass
-        
+
         return value if value else None
 
     def _recover_driver(self):
@@ -584,18 +799,16 @@ class GrantsGovScraper(BaseScraper):
             logger.info("Selenium driver recovered successfully")
         else:
             logger.warning("Selenium driver recovery failed — "
-                         "continuing in API-only mode")
+                         "continuing without Selenium fallback")
 
     # ─── Data Merging ─────────────────────────────────────────────────
 
     def _merge_details(self, opportunity, details):
         """
-        Merge detail page data into the opportunity dict.
+        Merge detail data into the opportunity dict.
         
         Rules:
-            - Detail page values override API values ONLY if the API value 
-              is empty/None and the detail value is non-empty.
-            - For deadline: detail page may have more accurate date.
+            - Detail values fill in empty/None API fields.
             - Never overwrite a good value with None.
         """
         for field in ['description', 'eligibility', 'funding_amount']:
@@ -603,16 +816,13 @@ class GrantsGovScraper(BaseScraper):
             if detail_val and not opportunity.get(field):
                 opportunity[field] = detail_val
 
-        # Category: always prefer detail page over auto-guess
         if details.get('category'):
             opportunity['category'] = details.get('category')
 
-        # Deadline: prefer detail page if API didn't have one
         detail_deadline = details.get('deadline')
         if detail_deadline and not opportunity.get('deadline'):
             opportunity['deadline'] = detail_deadline
 
-        # Document URLs: merge
         detail_docs = details.get('document_urls', [])
         if detail_docs:
             existing = opportunity.get('document_urls', []) or []
@@ -623,42 +833,77 @@ class GrantsGovScraper(BaseScraper):
 
 
 if __name__ == "__main__":
-    from database.db import db
     import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Run the Grants.gov scraper standalone.",
+        epilog=(
+            "Examples:\n"
+            "  python -m scrapers.grants_gov                          # full run, 19 keywords, max 3 pages\n"
+            "  python -m scrapers.grants_gov --keywords health energy # only 2 keywords\n"
+            "  python -m scrapers.grants_gov --max-pages 1 --dry-run  # quick test, no DB writes\n"
+            "  python -m scrapers.grants_gov --dry-run --keywords health --max-pages 1  # minimal test\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        '--keywords', nargs='+', default=None,
+        help='Search keywords (default: all 19 built-in keywords)',
+    )
+    parser.add_argument(
+        '--max-pages', type=int, default=3,
+        help='Max API pages per keyword, 25 results each (default: 3)',
+    )
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Scrape and print results but do NOT write to Supabase',
+    )
+    args = parser.parse_args()
+
+    if args.dry_run:
+        print("🧪 DRY-RUN MODE — results will be printed but NOT saved to Supabase\n")
+        def _dry_add(self, opp):
+            self.opportunities.append(opp)
+            self._new_count += 1
+            return True
+        BaseScraper.add_opportunity = _dry_add
+        db.opportunity_exists = lambda *a, **kw: False
 
     scraper = GrantsGovScraper()
-    
+
     try:
-        # Scrape with default keywords (all 19 of them) and max 3 pages each
-        opps = scraper.scrape(max_pages=3)
+        opps = scraper.scrape(keywords=args.keywords, max_pages=args.max_pages)
     except KeyboardInterrupt:
-        print("\n\n🛑 Script stopped manually!")
+        print("\n\n🛑 Stopped manually!")
         opps = scraper.opportunities
     except Exception as e:
-        print(f"\n\n💥 Script crashed: {e}")
+        print(f"\n\n💥 Crashed: {e}")
         opps = scraper.opportunities
-    finally:
-        print(f"\nRescuing {len(opps)} opportunities scraped so far...\n")
-        print("⏳ Connecting to Supabase... (Please DO NOT press Ctrl+C again!)\n")
-        
-        for i, opp in enumerate(opps[:3]):
-            print(f"--- #{i+1} ---")
-            for k, v in opp.items():
-                print(f"  {k}: {str(v)[:150]}")
-            print()
 
-        # Insert to DB
-        inserted = 0
+    print(f"\n{'=' * 60}")
+    print(f"Total opportunities collected: {len(opps)}")
+    print(f"{'=' * 60}\n")
+
+    for i, opp in enumerate(opps[:5]):
+        print(f"--- #{i + 1} ---")
+        for k, v in opp.items():
+            val = str(v)
+            if len(val) > 200:
+                val = val[:200] + '...'
+            print(f"  {k}: {val}")
+        print()
+
+    if len(opps) > 5:
+        print(f"  ... and {len(opps) - 5} more.\n")
+
+    if args.dry_run:
+        print("🧪 Dry run complete — nothing was written to Supabase.")
+    else:
+        print(f"✅ All {len(opps)} opportunities were saved to Supabase during scraping.")
         try:
-            for opp in opps:
-                result = db.insert_opportunity(opp)
-                if result:
-                    inserted += 1
-        except KeyboardInterrupt:
-            print("\n\n⚠️ Rescue interrupted by second Ctrl+C! Stopping DB inserts.")
-        except Exception as e:
-            print(f"\n\n💥 DB Error during rescue: {e}")
+            print(f"📊 DB Stats: {db.get_stats()}")
+        except Exception:
+            pass
 
-        print(f"\n✅ Saved: {inserted}/{len(opps)} new opportunities to Supabase")
-        print(f"📊 DB Stats: {db.get_stats()}")
-        sys.exit(0 if inserted > 0 or len(opps) == 0 else 1)
+    sys.exit(0)
