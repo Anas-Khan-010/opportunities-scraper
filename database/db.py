@@ -49,7 +49,7 @@ class Database:
             opportunity_number TEXT,
             opportunity_type TEXT DEFAULT NULL,
             posted_date TIMESTAMP,
-            document_urls TEXT[],
+            document_urls TEXT,
             scraped_at TIMESTAMP DEFAULT NOW()
         );
 
@@ -88,6 +88,13 @@ class Database:
         """Insert or update opportunity — backfills empty fields on conflict."""
         data_copy = dict(data)
         data_copy.setdefault('opportunity_type', None)
+        
+        # Convert list of URLs to space-separated string
+        doc_urls = data_copy.get('document_urls', [])
+        if isinstance(doc_urls, list):
+            data_copy['document_urls_str'] = " ".join(doc_urls) if doc_urls else None
+        else:
+            data_copy['document_urls_str'] = doc_urls
 
         query = """
         INSERT INTO opportunities (
@@ -97,7 +104,7 @@ class Database:
         ) VALUES (
             %(title)s, %(organization)s, %(description)s, %(eligibility)s, %(funding_amount)s,
             %(deadline)s, %(category)s, %(location)s, %(source)s, %(source_url)s, %(opportunity_number)s,
-            %(posted_date)s, %(document_urls)s, %(opportunity_type)s
+            %(posted_date)s, %(document_urls_str)s, %(opportunity_type)s
         )
         ON CONFLICT (source_url) DO UPDATE SET
             title              = COALESCE(NULLIF(opportunities.title, ''), EXCLUDED.title),
@@ -110,11 +117,7 @@ class Database:
             location           = COALESCE(opportunities.location, EXCLUDED.location),
             opportunity_number = COALESCE(opportunities.opportunity_number, EXCLUDED.opportunity_number),
             posted_date        = COALESCE(opportunities.posted_date, EXCLUDED.posted_date),
-            document_urls      = CASE
-                WHEN opportunities.document_urls IS NULL OR array_length(opportunities.document_urls, 1) IS NULL
-                THEN EXCLUDED.document_urls
-                ELSE opportunities.document_urls
-            END,
+            document_urls      = COALESCE(opportunities.document_urls, EXCLUDED.document_urls),
             opportunity_type   = COALESCE(opportunities.opportunity_type, EXCLUDED.opportunity_type),
             scraped_at         = NOW()
         RETURNING id

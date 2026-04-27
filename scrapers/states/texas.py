@@ -9,14 +9,15 @@ Scrapes three sections of the Texas Comptroller's procurement site:
 Uses Selenium because the site is a SuiteCommerce single-page application.
 Each section lists cards on listing pages, then we visit detail pages for
 rich data (description, eligibility, funding, attachments/PDFs).
+
+Source: https://www.txsmartbuy.gov
 """
 
 import time
 import random
 import urllib.parse
 
-from scrapers.base_scraper import BaseScraper
-from scrapers.state_scrapers import _SeleniumDriverManager, SELENIUM_DELAY_RANGE
+from scrapers.base_scraper import BaseScraper, SeleniumDriverManager, SELENIUM_DELAY_RANGE
 from config.settings import config
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
@@ -61,7 +62,7 @@ class TexasESBDScraper(BaseScraper):
     def scrape(self):
         logger.info("Starting Texas ESBD scraper (grants + solicitations + pre-solicitations)...")
 
-        driver = _SeleniumDriverManager.get_driver()
+        driver = SeleniumDriverManager.get_driver()
         if driver is None:
             logger.error("Selenium driver unavailable — skipping Texas ESBD")
             return self.opportunities
@@ -126,6 +127,8 @@ class TexasESBDScraper(BaseScraper):
                 opp = self._parse_listing_card(card, section, seen_urls)
                 if opp:
                     self._enrich_from_detail(driver, opp, section)
+                    if opp.get('document_urls'):
+                        self.enrich_from_documents(opp)
                     is_new = self.add_opportunity(opp)
                     if is_new:
                         new_count += 1
