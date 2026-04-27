@@ -43,42 +43,52 @@ class Config:
     SAM_GOV_PAGE_DELAY = float(os.getenv('SAM_GOV_PAGE_DELAY', '1800'))
     SAM_GOV_MAX_REQUESTS = int(os.getenv('SAM_GOV_MAX_REQUESTS', '4'))
 
-    # ── 3. Duke Research Funding ───────────────────────────────────────
-    DUKE_BASE_URL = os.getenv('DUKE_BASE_URL', 'https://researchfunding.duke.edu')
-    DUKE_LISTING_URL = os.getenv(
-        'DUKE_LISTING_URL',
-        'https://researchfunding.duke.edu/search-results?open=1&sort_bef_combine=deadline_ASC',
-    )
-
-    # ── 4. California Grants Portal (CKAN API) ────────────────────────
+    # ── 3. California Grants Portal (CKAN API) ────────────────────────
     CA_GRANTS_API_URL = os.getenv('CA_GRANTS_API_URL', 'https://data.ca.gov/api/3/action/datastore_search_sql')
     CA_GRANTS_RESOURCE_ID = os.getenv('CA_GRANTS_RESOURCE_ID', '111c8c88-21f6-453c-ae2c-b4785a0624f5')
 
-    # ── 5. The Grant Portal (TGP) ─────────────────────────────────────
-    TGP_BASE_URL = os.getenv('TGP_BASE_URL', 'https://www.thegrantportal.com')
-    TGP_MAX_PAGES_PER_STATE = int(os.getenv('TGP_MAX_PAGES_PER_STATE', '10'))
-    TGP_MAX_NEW_PER_STATE = int(os.getenv('TGP_MAX_NEW_PER_STATE', '10'))
-    TGP_EMAIL = os.getenv('TGP_EMAIL', '')
-    TGP_PASSWORD = os.getenv('TGP_PASSWORD', '')
+    # ── 4. Alaska DCRA Grants (ArcGIS Feature Service) ────────────────
+    AK_DCRA_MAX_PAGES = int(os.getenv('AK_DCRA_MAX_PAGES', '200'))
 
-    # ── 6. Texas ESBD ─────────────────────────────────────────────────
+    # ── 5. New York Grants Gateway (PeopleSoft / Selenium) ───────────
+    NY_GRANTS_URL = os.getenv(
+        'NY_GRANTS_URL',
+        'https://esupplier.sfs.ny.gov/psp/fscm/SUPPLIER/ERP/c/NY_SUPPUB_FL.AUC_RESP_INQ_AUC.GBL',
+    )
+
+    # ── 6. Minnesota Grants (JSON search API) ────────────────────────
+    MN_GRANTS_MAX_PAGES = int(os.getenv('MN_GRANTS_MAX_PAGES', '10'))
+
+    # ── 7. North Dakota Grants (WebGrants HTML) ────────────────────
+    # No special config needed — listing URL is hardcoded in the scraper
+
+    # ── 8. Texas ESBD ─────────────────────────────────────────────────
     TX_ESBD_BASE_URL = os.getenv('TX_ESBD_BASE_URL', 'https://www.txsmartbuy.gov')
     TX_ESBD_GRANTS_MAX_PAGES = int(os.getenv('TX_ESBD_GRANTS_MAX_PAGES', '10'))
     TX_ESBD_SOLICITATIONS_MAX_PAGES = int(os.getenv('TX_ESBD_SOLICITATIONS_MAX_PAGES', '15'))
     TX_ESBD_PRESOLICITATIONS_MAX_PAGES = int(os.getenv('TX_ESBD_PRESOLICITATIONS_MAX_PAGES', '15'))
 
-    # ── 7. NC eVP ─────────────────────────────────────────────────────
+    # ── 9. NC eVP ─────────────────────────────────────────────────────
     NC_EVP_BASE_URL = os.getenv('NC_EVP_BASE_URL', 'https://evp.nc.gov')
     NC_EVP_MAX_PAGES = int(os.getenv('NC_EVP_MAX_PAGES', '50'))
 
-    # ── 8. GovernmentContracts.us ──────────────────────────────────────
-    GOVCONTRACTS_BASE_URL = os.getenv('GOVCONTRACTS_BASE_URL', 'https://www.governmentcontracts.us')
-    GOVCONTRACTS_MAX_PAGES_PER_STATE = int(os.getenv('GOVCONTRACTS_MAX_PAGES_PER_STATE', '5'))
-    GOVCONTRACTS_MAX_NEW_PER_STATE = int(os.getenv('GOVCONTRACTS_MAX_NEW_PER_STATE', '10'))
+    # ── 10. Michigan MI Funding Hub (Selenium SPA) ──────────────────
+    MI_FUNDING_HUB_MAX_PAGES = int(os.getenv('MI_FUNDING_HUB_MAX_PAGES', '20'))
 
-    # ── 9. RFPMart ────────────────────────────────────────────────────
-    RFPMART_BASE_URL = os.getenv('RFPMART_BASE_URL', 'https://www.rfpmart.com')
-    RFPMART_MAX_PAGES = int(os.getenv('RFPMART_MAX_PAGES', '10'))
+    # ── 11. Montana eMACS / Jaggaer (Selenium + PDF) ───────────────
+    MT_EMACS_MAX_PAGES = int(os.getenv('MT_EMACS_MAX_PAGES', '15'))
+
+    # ── 12. Illinois CSFA (HTML + detail pages) ────────────────────
+    IL_CSFA_MAX_PROGRAMS = int(os.getenv('IL_CSFA_MAX_PROGRAMS', '200'))
+
+    # ── 13. New Jersey DHS (Selenium + PDF) ─────────────────────────
+    # No special config — single page with three tables
+
+    # ── 14. Delaware MMP Bids (Selenium SPA + PDF) ──────────────────
+    DE_BIDS_MAX_PAGES = int(os.getenv('DE_BIDS_MAX_PAGES', '10'))
+
+    # ── 15. New Hampshire Procurement (Selenium + PDF) ──────────────
+    NH_PROCUREMENT_MAX_PAGES = int(os.getenv('NH_PROCUREMENT_MAX_PAGES', '10'))
 
     # ── User Agents ────────────────────────────────────────────────────
     USER_AGENTS = [

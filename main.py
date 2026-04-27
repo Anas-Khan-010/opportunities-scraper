@@ -3,19 +3,25 @@
 US Government Opportunities Scraping System
 
 Main orchestrator — runs all scrapers and stores data in Supabase.
-Targets 1,000,000+ grants, contracts, and RFPs across all 50 US states,
-federal agencies, and research foundations.
+Scrapes grants, contracts, and RFPs from official government sources
+across federal agencies and US states.
 
 Scraper pipeline:
   - Grants.gov              Federal grants (API + Selenium detail pages)
   - SAM.gov                 Federal contracts (API, rate-limited)
-  - Duke Research Funding   Foundation / research grants (Selenium)
+  - Alaska DCRA Grants      AK grants (ArcGIS Feature Service API)
   - California Grants       State grants (CKAN open-data API)
-  - The Grant Portal        State grants across all 50 states (Selenium)
+  - Delaware MMP Bids       DE bids/RFPs (Selenium SPA + PDF enrichment)
+  - Illinois CSFA           IL grant programs (HTML + detail pages)
+  - Michigan Funding Hub    MI grants (Selenium SPA)
+  - Minnesota Grants        MN grant programs (JSON search API)
+  - Montana eMACS           MT bids/RFPs (Selenium Jaggaer + PDF enrichment)
+  - New Hampshire Proc.     NH bids (Selenium + PDF enrichment)
+  - New Jersey DHS          NJ RFPs/RFAs/RFIs (Selenium + PDF enrichment)
+  - NY Grants Gateway       New York grants (PeopleSoft / Selenium)
+  - North Dakota Grants     ND grants (WebGrants HTML)
   - Texas ESBD              TX grants, solicitations, pre-solicitations (Selenium)
   - NC eVP                  North Carolina solicitations (Selenium)
-  - GovernmentContracts.us  State & local RFPs across all 50 states (HTML)
-  - RFPMart                 Federal + state RFPs — largest source (HTML)
 
 Each opportunity is written to the database in real-time as it is scraped,
 so no data is lost if the process is interrupted.
@@ -27,14 +33,8 @@ from database.db import db
 from utils.logger import logger
 from scrapers.grants_gov import GrantsGovScraper
 from scrapers.sam_gov import SAMGovScraper
-from scrapers.foundation_scrapers import DukeResearchFundingScraper
-from scrapers.state_grant_scrapers import get_all_state_grant_scrapers
-from scrapers.tgp_grant_scraper import get_tgp_grant_scrapers
-from scrapers.texas_esbd_scraper import get_texas_esbd_scrapers
-from scrapers.nc_evp_scraper import get_nc_evp_scrapers
-from scrapers.govcontracts_rfp_scraper import get_govcontracts_rfp_scrapers
-from scrapers.rfpmart_scraper import get_rfpmart_scrapers
-from scrapers.state_scrapers import cleanup_state_scrapers
+from scrapers.states import get_all_state_scrapers
+from scrapers.base_scraper import cleanup_selenium
 
 
 class ScraperOrchestrator:
@@ -59,26 +59,8 @@ class ScraperOrchestrator:
         # 2 ── SAM.gov (federal contracts) ─────────────────────────────
         self.scrapers.append(SAMGovScraper())
 
-        # 3 ── Foundation / research grants ────────────────────────────
-        self.scrapers.append(DukeResearchFundingScraper())
-
-        # 4 ── State grants — supplementary (CA API) ──────────────────
-        self.scrapers.extend(get_all_state_grant_scrapers())
-
-        # 5 ── TGP grants (thegrantportal.com — all 50 states) ────────
-        self.scrapers.extend(get_tgp_grant_scrapers())
-
-        # 6 ── Texas ESBD (grants + solicitations + pre-solicitations) ─
-        self.scrapers.extend(get_texas_esbd_scrapers())
-
-        # 7 ── NC eVP (North Carolina solicitations) ──────────────────
-        self.scrapers.extend(get_nc_evp_scrapers())
-
-        # 8 ── GovContracts RFPs (governmentcontracts.us — all 50) ────
-        self.scrapers.extend(get_govcontracts_rfp_scrapers())
-
-        # 9 ── RFPMart (rfpmart.com — massive US RFP aggregator) ────
-        self.scrapers.extend(get_rfpmart_scrapers())
+        # 3 ── State scrapers (AK, CA, DE, IL, MI, MN, MT, NH, NJ, NY, ND, TX, NC)
+        self.scrapers.extend(get_all_state_scrapers())
 
         logger.info(f"Registered {len(self.scrapers)} scrapers")
 
@@ -154,19 +136,19 @@ def main():
         orchestrator.run_scrapers()
         orchestrator.print_summary()
 
-        cleanup_state_scrapers()
+        cleanup_selenium()
 
         logger.info("System shutdown complete")
         return 0
 
     except KeyboardInterrupt:
         logger.warning("\nScraping interrupted by user")
-        cleanup_state_scrapers()
+        cleanup_selenium()
         return 1
 
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-        cleanup_state_scrapers()
+        cleanup_selenium()
         return 1
 
 

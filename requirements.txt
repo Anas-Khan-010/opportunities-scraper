@@ -8,3 +8,4 @@ undetected-chromedriver>=3.5.0
 setuptools>=65.0.0
 PyPDF2==3.0.1
 python-dateutil==2.8.2
+cloudscraper>=1.2.71

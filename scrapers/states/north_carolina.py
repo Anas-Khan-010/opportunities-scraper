@@ -6,16 +6,16 @@ official eVP portal.  Uses Selenium for the JS-rendered listing table,
 then visits each detail page to extract description, attachments, and
 solicitation type.
 
-Listing:  https://evp.nc.gov/solicitations/?status=0
-Detail:   https://evp.nc.gov/solicitations/details/?id={guid}
+Source:  https://evp.nc.gov
+Listing: https://evp.nc.gov/solicitations/?status=0
+Detail:  https://evp.nc.gov/solicitations/details/?id={guid}
 """
 
 import time
 import random
 import urllib.parse
 
-from scrapers.base_scraper import BaseScraper
-from scrapers.state_scrapers import _SeleniumDriverManager, SELENIUM_DELAY_RANGE
+from scrapers.base_scraper import BaseScraper, SeleniumDriverManager, SELENIUM_DELAY_RANGE
 from config.settings import config
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
@@ -37,7 +37,7 @@ class NCeVPScraper(BaseScraper):
     def scrape(self):
         logger.info("Starting NC eVP scraper...")
 
-        driver = _SeleniumDriverManager.get_driver()
+        driver = SeleniumDriverManager.get_driver()
         if driver is None:
             logger.error("Selenium driver unavailable — skipping NC eVP")
             return self.opportunities
@@ -261,6 +261,28 @@ class NCeVPScraper(BaseScraper):
                     if raw:
                         opp['posted_date'] = parse_date(raw)
 
+            if not opp.get('funding_amount'):
+                for sel in ['#evp_estimatedvalue', 'input[id*="budget"]',
+                            'input[id*="estimatedvalue"]', '#evp_budgetamount',
+                            'input[id*="amount"]']:
+                    field = soup.select_one(sel)
+                    if field:
+                        val = (field.get('value') or clean_text(field.get_text())).strip()
+                        if val and val not in ('0', '0.00', ''):
+                            opp['funding_amount'] = val
+                            break
+
+            if not opp.get('eligibility'):
+                for sel in ['#evp_qualifications', 'textarea[id*="qualif"]',
+                            '#evp_eligibility', 'textarea[id*="eligib"]',
+                            '#evp_requirements', 'textarea[id*="require"]']:
+                    field = soup.select_one(sel)
+                    if field:
+                        val = clean_text(field.get_text())
+                        if val and len(val) > 10:
+                            opp['eligibility'] = val[:1000]
+                            break
+
             doc_urls = []
             for a in soup.select('.note .attachment a[href], a.attachment-link, a[href$=".pdf"], a[href$=".doc"], a[href$=".docx"]'):
                 href = (a.get('href') or '').strip()
@@ -270,6 +292,9 @@ class NCeVPScraper(BaseScraper):
                         doc_urls.append(full_url)
             if doc_urls:
                 opp['document_urls'] = doc_urls[:10]
+
+            if opp.get('document_urls'):
+                self.enrich_from_documents(opp)
 
         except Exception as exc:
             logger.debug(f"NC eVP: detail enrichment failed for {detail_url}: {exc}")
