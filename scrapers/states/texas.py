@@ -247,18 +247,48 @@ class TexasESBDScraper(BaseScraper):
             except Exception:
                 pass
 
-            try:
-                WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, '.esbd-result-cell'))
+            # Try several cell-container selectors; SuiteCommerce occasionally
+            # reflows the markup and we don't want to silently get 0 fields.
+            wait_selectors = (
+                '.esbd-result-cell',
+                '.esbd-result-detail',
+                '.esbd-detail-cell',
+                'div[class*="esbd-result"]',
+            )
+            wait_hit = False
+            for sel in wait_selectors:
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+                    )
+                    wait_hit = True
+                    break
+                except Exception:
+                    continue
+            if not wait_hit:
+                logger.warning(
+                    f"Texas ESBD: detail container did not render for {detail_url}; "
+                    f"continuing with whatever DOM is available"
                 )
-            except Exception:
-                pass
             time.sleep(random.uniform(4, 7))
 
             soup = self.parse_html(driver.page_source)
 
             self._extract_detail_fields(soup, opp, section)
             self._extract_attachments(soup, opp)
+
+            # Surface silent enrichment failures so they don't masquerade as
+            # successful runs in monitoring. We don't error out — we just log.
+            extracted_signals = sum(
+                1
+                for k in ('description', 'opportunity_number', 'organization', 'deadline')
+                if opp.get(k) and opp.get(k) not in ('State of Texas',)
+            )
+            if extracted_signals == 0 and not opp.get('document_urls'):
+                logger.warning(
+                    f"Texas ESBD: no detail fields extracted from {detail_url}; "
+                    f"layout may have drifted"
+                )
 
         except Exception as exc:
             logger.debug(f"Texas ESBD: detail enrichment failed for {detail_url}: {exc}")

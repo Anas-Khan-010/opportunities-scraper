@@ -21,6 +21,10 @@ class NevadaEProScraper(BaseScraper):
     SEARCH_URL = "https://nevadaepro.com/bso/view/search/external/advancedSearchBid.xhtml?openBids=true"
     BASE_URL = "https://nevadaepro.com"
 
+    # Periscope/PrimeFaces 13 sometimes ships the listing under either
+    # bidDetail.sdo (legacy) or bidDetail.xhtml (current). Both must match.
+    _DETAIL_MARKERS = ('/bso/external/bidDetail.sdo', '/bso/external/bidDetail.xhtml')
+
     def __init__(self):
         super().__init__("NevadaEPro")
 
@@ -33,37 +37,57 @@ class NevadaEProScraper(BaseScraper):
             return self.opportunities
 
         try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
             driver.get(self.SEARCH_URL)
-            time.sleep(random.uniform(5, 8))
+            # Wait for the PrimeFaces datatable to materialize before parsing.
+            try:
+                WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, 'table.ui-datatable-data tr, table[id*="bidSearch"] tr')
+                    )
+                )
+            except Exception:
+                logger.debug("Nevada: data table didn't appear via WebDriverWait; continuing")
+            time.sleep(random.uniform(3, 6))
 
             html = driver.page_source
             soup = BeautifulSoup(html, 'html.parser')
 
-            results_div = soup.find('div', id=lambda x: x and 'results' in x.lower())
-            if not results_div:
-                results_div = soup
-
-            table = results_div.find('table', id=lambda x: x and 'bidSearchResultsTable' in str(x))
+            table = (
+                soup.find('table', id=lambda x: x and 'bidSearchResultsTable' in str(x))
+                or soup.find('table', class_=lambda x: x and 'ui-datatable-data' in str(x))
+                or soup.find('table', class_=lambda x: x and 'ui-datatable' in str(x))
+            )
             if not table:
-                table = results_div.find('table', class_=lambda x: x and 'ui-datatable' in str(x))
-
+                # Fall back to whichever table has the most data rows.
+                tables = soup.find_all('table')
+                if tables:
+                    table = max(
+                        tables,
+                        key=lambda t: len([r for r in t.find_all('tr') if r.find('td')]),
+                    )
             if not table:
                 logger.warning(f"No results table found on {self.source_name}")
                 self.log_summary()
                 return self.opportunities
 
-            rows = table.find_all('tr')
-            if len(rows) > 1:
-                data_rows = [r for r in rows if r.find('td')]
-                
-                for row in data_rows:
-                    if self.reached_limit():
-                        break
-                    opp = self.parse_opportunity(row)
-                    if opp:
-                        self.add_opportunity(opp)
+            # Build a header-name → index map so we don't depend on column order.
+            header_map = self._extract_header_map(table)
 
-                logger.info(f"  Parsed {len(data_rows)} rows from {self.source_name}")
+            rows = table.find_all('tr')
+            data_rows = [r for r in rows if r.find('td')]
+
+            for row in data_rows:
+                if self.reached_limit():
+                    break
+                opp = self.parse_row(row, header_map)
+                if opp:
+                    self.add_opportunity(opp)
+
+            logger.info(f"  Parsed {len(data_rows)} rows from {self.source_name}")
 
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
@@ -71,41 +95,58 @@ class NevadaEProScraper(BaseScraper):
         self.log_summary()
         return self.opportunities
 
-    def parse_opportunity(self, row):
-        """
-        Parses a single row from the Periscope table.
-        Columns typically:
-        Bid Solicitation #, Organization Name, Blanket #, Buyer, Description,
-        Bid Opening Date, Bid Holder List, Awarded Vendor(s), Status, Alternate Id
-        """
+    def _extract_header_map(self, table):
+        """Map normalized header label -> cell index."""
+        head_row = table.find('tr')
+        if not head_row:
+            return {}
+        cells = head_row.find_all(['th', 'td'])
+        m = {}
+        for idx, c in enumerate(cells):
+            label = (clean_text(c.get_text(separator=' ', strip=True)) or '').lower()
+            if not label:
+                continue
+            m[label] = idx
+        return m
+
+    @staticmethod
+    def _idx_for(header_map, *keywords):
+        """Pick the first column index whose label contains any of the keywords."""
+        for label, idx in header_map.items():
+            for kw in keywords:
+                if kw in label:
+                    return idx
+        return None
+
+    def parse_row(self, row, header_map):
+        """Parse a Periscope row using header-aware column lookup."""
         cells = row.find_all('td')
-        if len(cells) < 5:
+        if len(cells) < 4:
             return None
 
         try:
             cell_texts = [clean_text(c.get_text(separator=' ', strip=True)) for c in cells]
-            
-            def _extract_val(text, prefix):
-                if text.lower().startswith(prefix.lower()):
-                    return text[len(prefix):].strip()
-                return text
 
-            raw_opp_num = cell_texts[0] if len(cell_texts) > 0 else ''
-            opp_number = _extract_val(raw_opp_num, 'Bid Solicitation #')
-            
-            raw_org = cell_texts[1] if len(cell_texts) > 1 else ''
-            org = _extract_val(raw_org, 'Organization Name')
-            
-            raw_buyer = cell_texts[3] if len(cell_texts) > 3 else ''
-            buyer = _extract_val(raw_buyer, 'Buyer')
-            
-            raw_desc = cell_texts[4] if len(cell_texts) > 4 else ''
-            title = _extract_val(raw_desc, 'Description')
-            
-            raw_deadline = cell_texts[5] if len(cell_texts) > 5 else ''
-            deadline_str = _extract_val(raw_deadline, 'Bid Opening Date')
+            i_num = self._idx_for(header_map, 'solicitation', 'bid #', 'bid number')
+            i_org = self._idx_for(header_map, 'organization', 'agency', 'department')
+            i_buyer = self._idx_for(header_map, 'buyer', 'contact')
+            i_desc = self._idx_for(header_map, 'description', 'title')
+            i_deadline = self._idx_for(header_map, 'opening', 'closing', 'due', 'close date')
+            i_status = self._idx_for(header_map, 'status')
 
-            if not title or title == 'Description':
+            def at(i):
+                if i is None or i >= len(cell_texts):
+                    return ''
+                return cell_texts[i]
+
+            opp_number = at(i_num) or (cell_texts[0] if cell_texts else '')
+            org = at(i_org)
+            buyer = at(i_buyer)
+            title = at(i_desc) or opp_number
+            deadline_str = at(i_deadline)
+            status = at(i_status)
+
+            if not title or title.lower() in ('description', 'title'):
                 title = opp_number
             if not title:
                 return None
@@ -115,21 +156,37 @@ class NevadaEProScraper(BaseScraper):
             links = row.find_all('a', href=True)
             detail_url = None
             doc_urls = []
-            
+
             for link in links:
-                href = link['href']
+                href = (link.get('href') or '').strip()
+                if not href:
+                    continue
+                hl = href.lower()
+                if hl.startswith(('javascript:', 'mailto:', '#')):
+                    continue
                 if not href.startswith('http'):
-                    href = self.BASE_URL + href
-                
-                if '/bso/external/bidDetail.sdo' in href:
+                    href = self.BASE_URL + ('' if href.startswith('/') else '/') + href.lstrip('/')
+
+                if any(m in hl for m in self._DETAIL_MARKERS):
                     detail_url = href
-                elif href.endswith('.pdf'):
+                elif hl.endswith(('.pdf', '.doc', '.docx')):
                     doc_urls.append(href)
 
-            source_url = detail_url or self.SEARCH_URL
+            if detail_url:
+                source_url = detail_url
+            elif opp_number:
+                source_url = f"{self.SEARCH_URL}#{opp_number}"
+            else:
+                source_url = f"{self.SEARCH_URL}#{title[:80].replace(' ', '_')}"
+
             category = categorize_opportunity(title, '')
 
-            description = f"Buyer: {buyer}" if buyer else None
+            desc_parts = []
+            if buyer:
+                desc_parts.append(f"Buyer: {buyer}")
+            if status:
+                desc_parts.append(f"Status: {status}")
+            description = '; '.join(desc_parts) if desc_parts else None
 
             return {
                 'title': title,
@@ -151,6 +208,10 @@ class NevadaEProScraper(BaseScraper):
         except Exception as e:
             logger.warning(f"Error parsing Nevada row: {e}")
             return None
+
+    def parse_opportunity(self, element):
+        # Required by BaseScraper. Use parse_row(row, header_map) inside scrape().
+        return None
 
 
 def get_nevada_scrapers():

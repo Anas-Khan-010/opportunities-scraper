@@ -39,17 +39,22 @@ class UtahBonfireScraper(BaseScraper):
             html = driver.page_source
             soup = BeautifulSoup(html, 'html.parser')
 
-            table = soup.find('table')
-
-            if not table:
+            tables = soup.find_all('table')
+            if not tables:
                 logger.warning(f"No results table found on {self.source_name}")
                 self.log_summary()
                 return self.opportunities
 
+            # Bonfire renders a header-only table BEFORE the data table.
+            # Pick the table with the most data rows (defensive against re-orderings).
+            table = max(
+                tables,
+                key=lambda t: len([r for r in t.find_all('tr') if r.find('td')]),
+            )
             rows = table.find_all('tr')
-            if len(rows) > 1:
-                data_rows = [r for r in rows if r.find('td')]
-                
+            data_rows = [r for r in rows if r.find('td')]
+
+            if data_rows:
                 for row in data_rows:
                     if self.reached_limit():
                         break
@@ -58,6 +63,8 @@ class UtahBonfireScraper(BaseScraper):
                         self.add_opportunity(opp)
 
                 logger.info(f"  Parsed {len(data_rows)} rows from {self.source_name}")
+            else:
+                logger.warning(f"{self.source_name}: tables found but no data rows")
 
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
@@ -93,16 +100,30 @@ class UtahBonfireScraper(BaseScraper):
             links = row.find_all('a', href=True)
             detail_url = None
             doc_urls = []
-            
+
             for link in links:
-                href = link['href']
+                href = (link.get('href') or '').strip()
+                if not href:
+                    continue
+                hl = href.lower()
+                if hl.startswith(('javascript:', 'mailto:', '#')):
+                    continue
                 if not href.startswith('http'):
                     href = self.BASE_URL + href
-                
-                if '/opportunities/' in href:
-                    detail_url = href
 
-            source_url = detail_url or self.SEARCH_URL
+                if '/opportunities/' in href and not detail_url:
+                    detail_url = href
+                elif hl.endswith(('.pdf', '.doc', '.docx')):
+                    doc_urls.append(href)
+
+            # Stable per-row source_url so dedup doesn't collapse all rows
+            # back onto SEARCH_URL when Bonfire hides the detail link.
+            if detail_url:
+                source_url = detail_url
+            elif opp_number:
+                source_url = f"{self.SEARCH_URL}#{opp_number}"
+            else:
+                source_url = f"{self.SEARCH_URL}#{title[:80].replace(' ', '_')}"
             category = categorize_opportunity(title, '')
 
             description = f"Status: {status}" if status else None

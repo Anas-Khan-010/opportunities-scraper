@@ -11,6 +11,8 @@ Listing: https://evp.nc.gov/solicitations/?status=0
 Detail:  https://evp.nc.gov/solicitations/details/?id={guid}
 """
 
+import json
+import re
 import time
 import random
 import urllib.parse
@@ -19,6 +21,35 @@ from scrapers.base_scraper import BaseScraper, SeleniumDriverManager, SELENIUM_D
 from config.settings import config
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
+
+
+def _unwrap_json_value(value):
+    """eVP often stores Dataverse lookup fields as JSON in data-value
+    (e.g. {"id":"...","name":"NCDOT"}). Extract the human-readable label."""
+    if not value or not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or stripped[0] not in '[{':
+        return value
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return value
+    if isinstance(parsed, dict):
+        for key in ('name', 'displayName', 'value', 'label', 'text'):
+            v = parsed.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    if isinstance(parsed, list) and parsed:
+        head = parsed[0]
+        if isinstance(head, dict):
+            for key in ('name', 'displayName', 'value', 'label', 'text'):
+                v = head.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        if isinstance(head, str):
+            return head
+    return value
 
 BASE_URL = config.NC_EVP_BASE_URL
 LISTING_URL = f'{BASE_URL}/solicitations/?status=0'
@@ -126,7 +157,12 @@ class NCeVPScraper(BaseScraper):
 
             for cell in cells:
                 attr = (cell.get('data-attribute') or '').lower()
-                value = clean_text(cell.get('data-value') or cell.get_text())
+                # Some lookup-typed eVP cells emit Dataverse JSON in data-value
+                # (e.g. owningbusinessunit). Unwrap it before storing as text.
+                raw_dv = cell.get('data-value')
+                if raw_dv:
+                    raw_dv = _unwrap_json_value(raw_dv)
+                value = clean_text(raw_dv or cell.get_text())
 
                 if attr == 'evp_name' or attr == 'evp_solicitationname':
                     title = value
@@ -241,7 +277,12 @@ class NCeVPScraper(BaseScraper):
             if org_field:
                 org_val = org_field.get('value') or clean_text(org_field.get_text())
                 if org_val:
-                    opp['organization'] = org_val
+                    opp['organization'] = _unwrap_json_value(org_val)
+
+            # Last-chance JSON unwrap on whatever organization we ended up with.
+            current_org = opp.get('organization') or ''
+            if current_org and current_org[:1] in '[{':
+                opp['organization'] = _unwrap_json_value(current_org)
 
             if not opp.get('deadline'):
                 for sel in ['#evp_opendate', '#evp_closedate', 'input[id*="closedate"]']:

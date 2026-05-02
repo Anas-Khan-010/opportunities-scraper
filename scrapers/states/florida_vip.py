@@ -1,13 +1,15 @@
 """
 Florida Procurement scraper — Florida Vendor Information Portal (VIP)
 
-Target: https://vendor.myfloridahome.com/
+Target: https://vendor.myfloridamarketplace.com/
 Official state portal for all bidding opportunities managed by MyFloridaMarketPlace (MFMP).
 """
 
 import time
 import random
 from bs4 import BeautifulSoup
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException
 from scrapers.base_scraper import BaseScraper, SeleniumDriverManager
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
@@ -15,7 +17,8 @@ from utils.helpers import clean_text, parse_date, categorize_opportunity
 class FloridaVIPScraper(BaseScraper):
     """Scrapes bid opportunities from the Florida Vendor Information Portal (VIP)."""
 
-    SEARCH_URL = "https://vendor.myfloridahome.com/search/bids"
+    SEARCH_URL = "https://vendor.myfloridamarketplace.com/search/bids"
+    BASE_URL = "https://vendor.myfloridamarketplace.com"
 
     def __init__(self):
         super().__init__("Florida VIP Procurement")
@@ -41,11 +44,11 @@ class FloridaVIPScraper(BaseScraper):
 
             # If the page requires clicking search to show all
             try:
-                search_btn = driver.find_element_by_css_selector('button[type="submit"], .btn-primary')
+                search_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"], .btn-primary')
                 if search_btn:
                     search_btn.click()
                     time.sleep(8)
-            except:
+            except (NoSuchElementException, Exception):
                 pass
 
             html = driver.page_source
@@ -74,7 +77,7 @@ class FloridaVIPScraper(BaseScraper):
                     source_url = self.SEARCH_URL
                     if link:
                         href = link['href']
-                        source_url = f"https://vendor.myfloridahome.com{href}" if not href.startswith('http') else href
+                        source_url = f"{self.BASE_URL}{href}" if not href.startswith('http') else href
 
                     self.add_opportunity({
                         'title': title,
@@ -90,13 +93,20 @@ class FloridaVIPScraper(BaseScraper):
                         'document_urls': [],
                         'opportunity_type': 'bid',
                     })
-                except: continue
+                except Exception as e:
+                    logger.debug(f"  Florida VIP row parse failed: {e}")
+                    continue
 
         except Exception as e:
             logger.error(f"Error scraping Florida VIP: {e}")
 
         self.log_summary()
         return self.opportunities
+
+    def parse_opportunity(self, element):
+        """Required by BaseScraper. Row parsing is inlined in scrape()."""
+        return None
+
 
 def get_florida_procurement_scrapers():
     return [FloridaVIPScraper()]

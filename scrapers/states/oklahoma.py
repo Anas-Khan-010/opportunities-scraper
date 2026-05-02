@@ -7,6 +7,7 @@ and Enterprise Services (OMES) Central Purchasing Division.
 Source: https://oklahoma.gov/omes/services/purchasing/solicitations.html
 """
 
+import random
 import time
 from bs4 import BeautifulSoup
 from scrapers.base_scraper import BaseScraper, SeleniumDriverManager
@@ -127,8 +128,9 @@ class OklahomaSolicitationsScraper(BaseScraper):
                     'opportunity_type': 'rfp',
                 })
 
-def get_oklahoma_scrapers():
-    return [OklahomaSolicitationsScraper()]
+    def parse_opportunity(self, element):
+        """Required by BaseScraper. Row parsing is inlined in scrape()."""
+        return None
 
 
 def get_oklahoma_scrapers():

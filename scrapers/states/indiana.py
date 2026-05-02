@@ -325,35 +325,45 @@ class IndianaIDOAScraper(BaseScraper):
             return
 
         soup = self.parse_html(resp.text)
-        target_table = None
+        # IDOA splits open events across several tables (one per category /
+        # status / agency group). Capture every table whose header looks
+        # like the "events" schema instead of stopping at the first match.
+        target_tables = []
         for table in soup.find_all("table"):
-            header_cells = table.find("tr").find_all(["th", "td"]) if table.find("tr") else []
+            first_row = table.find("tr")
+            if not first_row:
+                continue
+            header_cells = first_row.find_all(["th", "td"])
             header_text = " ".join(c.get_text(strip=True).lower() for c in header_cells)
             if "event name" in header_text and "agency" in header_text:
-                target_table = table
-                break
+                target_tables.append(table)
 
-        if target_table is None:
+        if not target_tables:
             logger.warning("Indiana IDOA: events table not found")
             return
 
-        rows = target_table.find_all("tr")[1:]
-        logger.info("Indiana IDOA: %d event rows found", len(rows))
+        total_rows = sum(len(t.find_all("tr")) - 1 for t in target_tables)
+        logger.info(
+            "Indiana IDOA: %d event tables, ~%d total rows",
+            len(target_tables), total_rows,
+        )
 
-        for row in rows:
-            if self.reached_limit():
-                break
-            opp = self.parse_opportunity(row)
-            if opp:
-                self._enrich_from_zip(opp)
-                if not opp.get("eligibility"):
-                    opp["eligibility"] = (
-                        "Open to vendors registered on the Indiana Supplier Portal. "
-                        "See solicitation documents (ZIP) for event-specific requirements."
-                    )
-                if not opp.get("funding_amount"):
-                    opp["funding_amount"] = "See solicitation documents for estimated value"
-                self.add_opportunity(opp)
+        for target_table in target_tables:
+            rows = target_table.find_all("tr")[1:]
+            for row in rows:
+                if self.reached_limit():
+                    return
+                opp = self.parse_opportunity(row)
+                if opp:
+                    self._enrich_from_zip(opp)
+                    if not opp.get("eligibility"):
+                        opp["eligibility"] = (
+                            "Open to vendors registered on the Indiana Supplier Portal. "
+                            "See solicitation documents (ZIP) for event-specific requirements."
+                        )
+                    if not opp.get("funding_amount"):
+                        opp["funding_amount"] = "See solicitation documents for estimated value"
+                    self.add_opportunity(opp)
 
     def parse_opportunity(self, row):
         try:

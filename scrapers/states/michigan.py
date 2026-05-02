@@ -241,6 +241,21 @@ class MichiganFundingHubScraper(BaseScraper):
             category = None
             doc_urls = []
 
+            # Prefer header / OG title tags BEFORE generic anchors so we
+            # don't end up with "Learn more" / "Apply now" as the title.
+            h_tag = element.find(re.compile(r'^h[1-6]$'))
+            if h_tag:
+                h_title = clean_text(h_tag.get_text())
+                if h_title and h_title.lower() not in self._GENERIC_TITLES and len(h_title) > 4:
+                    title = h_title
+                    a_in_h = h_tag.find('a', href=True)
+                    if a_in_h:
+                        href = (a_in_h.get('href') or '').strip()
+                        if href.startswith('http'):
+                            source_url = href
+                        elif href and not href.startswith(('javascript:', '#', 'mailto:')):
+                            source_url = f"https://mifundinghub.org{href}"
+
             link = element.find('a')
             if element.name == 'tr':
                 cells = element.find_all('td')
@@ -248,29 +263,28 @@ class MichiganFundingHubScraper(BaseScraper):
                     link = cells[0].find('a') if cells[0].find('a') else element.find('a')
 
             if link:
-                title = clean_text(link.get_text())
+                link_text = clean_text(link.get_text())
                 href = (link.get('href') or '').strip()
-                if href and href.startswith('http'):
-                    source_url = href
-                elif href:
-                    source_url = f"https://mifundinghub.org{href}"
+                if not title and link_text and link_text.lower() not in self._GENERIC_TITLES:
+                    title = link_text
+                if source_url == PORTAL_URL and href and not href.startswith(('javascript:', '#', 'mailto:')):
+                    if href.startswith('http'):
+                        source_url = href
+                    else:
+                        source_url = f"https://mifundinghub.org{href}"
 
+            # Final fallback: aria-label or full element text, but never
+            # accept a generic CTA as the title.
             if not title:
-                h_tag = element.find(re.compile(r'^h[1-6]$'))
-                if h_tag:
-                    title = clean_text(h_tag.get_text())
-                    a_in_h = h_tag.find('a')
-                    if a_in_h and a_in_h.get('href'):
-                        source_url = a_in_h['href']
-                        if not source_url.startswith('http'):
-                            source_url = f"https://mifundinghub.org{source_url}"
-
+                aria = element.get('aria-label') or ''
+                if aria and aria.lower() not in self._GENERIC_TITLES:
+                    title = clean_text(aria)
             if not title:
-                title = clean_text(element.get_text())
-                if title and len(title) > 200:
-                    title = title[:200]
+                full = clean_text(element.get_text())
+                if full and len(full) > 5 and full.lower() not in self._GENERIC_TITLES:
+                    title = full[:200]
 
-            if not title or len(title) < 5:
+            if not title or len(title) < 5 or title.lower() in self._GENERIC_TITLES:
                 return None
 
             full_text = element.get_text(separator=' ', strip=True)
@@ -292,12 +306,41 @@ class MichiganFundingHubScraper(BaseScraper):
             if amount:
                 funding_amount = amount
 
-            agency_match = re.search(
-                r'(?:agency|department|organization)\s*[:\-]?\s*([^\n|,]{5,60})',
-                full_text, re.IGNORECASE
+            # Pull organization from a labelled "Funder/Agency" row first
+            # (mifundinghub.org cards use these labels). Falling back to the
+            # bare regex match was truncating org names like "Department of
+            # Health and Human Services" into 5-char acronyms.
+            agency_el = element.find(
+                lambda t: t.name in ('span', 'div', 'p', 'li', 'strong')
+                and re.search(r'(funder|agency|department|administered by|sponsor)',
+                              clean_text(t.get_text()), re.IGNORECASE)
             )
-            if agency_match:
-                organization = clean_text(agency_match.group(1))
+            if agency_el:
+                # Try the next sibling first (label / value layout)
+                next_el = agency_el.find_next_sibling()
+                if next_el:
+                    cand = clean_text(next_el.get_text(separator=' ', strip=True))
+                else:
+                    cand = clean_text(agency_el.get_text(separator=' '))
+                # Strip the label prefix if it's still attached.
+                cand = re.sub(
+                    r'^(funder|agency|department|administered by|sponsor)\s*[:\-]?\s*',
+                    '',
+                    cand,
+                    flags=re.IGNORECASE,
+                ).strip()
+                if cand and 5 <= len(cand) <= 200:
+                    organization = cand
+            if organization == "State of Michigan":
+                agency_match = re.search(
+                    r'(?:agency|department|organization|funder|sponsor)\s*[:\-]?\s*'
+                    r'([A-Z][^\n|]{8,200})',
+                    full_text,
+                )
+                if agency_match:
+                    cand = clean_text(agency_match.group(1))
+                    if cand and 8 <= len(cand) <= 200:
+                        organization = cand
 
             for a in element.find_all('a', href=True):
                 href = a['href'].lower()

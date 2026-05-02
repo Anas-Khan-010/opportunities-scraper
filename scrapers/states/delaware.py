@@ -136,14 +136,18 @@ class DelawareBidsScraper(BaseScraper):
         """Parse bid entries from the rendered DOM."""
         rows = []
 
-        # Delaware uses a jqGrid table with ID 'jqGridBids'
+        # Delaware uses a jqGrid table with ID 'jqGridBids'.
+        # Build a header→index map from the visible <th> labels first so
+        # we know exactly where bid_number/agency/deadline/status live and
+        # don't have to guess via regex on raw cell text.
         table = soup.find('table', id='jqGridBids') or soup.find('table')
+        header_map = self._extract_jqgrid_header_map(soup, table)
         if table:
             for tr in table.find_all('tr'):
                 cells = tr.find_all('td')
                 if len(cells) < 2:
                     continue
-                row_data = self._parse_table_row(cells, tr)
+                row_data = self._parse_table_row(cells, tr, header_map)
                 if row_data:
                     rows.append(row_data)
             if rows:
@@ -165,46 +169,115 @@ class DelawareBidsScraper(BaseScraper):
 
         return rows
 
-    def _parse_table_row(self, cells, tr):
+    def _extract_jqgrid_header_map(self, soup, table):
+        """Return {normalized_header_label: column_index} for the bids grid.
+
+        jqGrid renders headers in a separate <table> inside .ui-jqgrid-hdiv,
+        not inside the data table itself. We look there first, then fall
+        back to the first row of the data table.
+        """
+        header_cells = []
+
+        hdiv = soup.find(class_='ui-jqgrid-hdiv') or soup.find(class_='ui-jqgrid-htable')
+        if hdiv:
+            header_cells = hdiv.find_all(['th', 'td'])
+
+        if not header_cells and table is not None:
+            first = table.find('tr')
+            if first:
+                header_cells = first.find_all(['th', 'td'])
+
+        out = {}
+        for idx, c in enumerate(header_cells):
+            label = (clean_text(c.get_text(separator=' ', strip=True)) or '').lower()
+            if label:
+                out[label] = idx
+        return out
+
+    @staticmethod
+    def _idx_for(header_map, *keywords):
+        for label, idx in header_map.items():
+            for kw in keywords:
+                if kw in label:
+                    return idx
+        return None
+
+    def _parse_table_row(self, cells, tr, header_map):
         """Parse a standard table row into structured data."""
         full_text = tr.get_text(separator=' ', strip=True)
         if len(full_text) < 10:
             return None
 
         link = tr.find('a', href=True)
-        title = clean_text(link.get_text()) if link else clean_text(cells[0].get_text())
-        detail_url = link['href'] if link else None
+        link_href = (link.get('href') or '').strip() if link else ''
+        title_from_link = clean_text(link.get_text()) if link else ''
+        title = title_from_link or clean_text(cells[0].get_text())
 
         if not title or len(title) < 3:
             return None
 
-        data = {
+        # Many jqGrid rows wire detail navigation through onclick handlers,
+        # leaving every <a href="#">. Reject the obvious junk so the URL
+        # pipeline can fall back to a per-row anchor.
+        if link_href.lower().startswith(('javascript:', '#')) or link_href == '':
+            link_href = ''
+
+        # Pull the row id jqGrid stamps onto each <tr>; this is reliably
+        # unique-per-bid and is the only thing that actually distinguishes
+        # rows when href is "#" everywhere.
+        row_id = (tr.get('id') or tr.get('data-rowid') or '').strip()
+
+        cell_texts = [clean_text(c.get_text(separator=' ', strip=True)) for c in cells]
+        # Header-aware column lookup
+        i_bid = self._idx_for(header_map, 'bid #', 'bid number', 'solicit')
+        i_agency = self._idx_for(header_map, 'agency', 'department', 'organization')
+        i_type = self._idx_for(header_map, 'type')
+        i_deadline = self._idx_for(header_map, 'close', 'deadline', 'due', 'opening')
+        i_status = self._idx_for(header_map, 'status')
+
+        def at(i):
+            if i is None or i >= len(cell_texts):
+                return ''
+            return cell_texts[i]
+
+        bid_number = at(i_bid)
+        agency = at(i_agency)
+        bid_type = at(i_type)
+        deadline = at(i_deadline)
+        status = at(i_status)
+
+        # Fallback heuristics: only used if header detection missed.
+        if not bid_number:
+            for text in cell_texts:
+                if re.match(r'^[A-Z]{2,5}[-_]\d', text):
+                    bid_number = text
+                    break
+        if not status:
+            for text in cell_texts:
+                if text.lower() in ('open', 'closed', 'awarded', 'pending', 'active'):
+                    status = text
+                    break
+        if not bid_type:
+            for text in cell_texts:
+                if text.lower() in ('rfp', 'rfq', 'rfi', 'itb', 'ifb'):
+                    bid_type = text
+                    break
+        if not deadline:
+            for text in cell_texts:
+                if re.match(r'\d{1,2}/\d{1,2}/\d{2,4}', text):
+                    deadline = text
+                    break
+
+        return {
             'title': title,
-            'detail_url': detail_url,
-            'bid_number': None,
-            'agency': None,
-            'bid_type': None,
-            'deadline': None,
-            'status': None,
+            'detail_url': link_href or None,
+            'row_id': row_id or None,
+            'bid_number': bid_number or None,
+            'agency': agency or None,
+            'bid_type': bid_type or None,
+            'deadline': deadline or None,
+            'status': status or None,
         }
-
-        for cell in cells:
-            text = clean_text(cell.get_text())
-            if not text:
-                continue
-            text_lower = text.lower()
-
-            if re.match(r'^[A-Z]{2,5}[-_]\d', text):
-                data['bid_number'] = text
-            elif text_lower in ('open', 'closed', 'awarded', 'pending', 'active'):
-                data['status'] = text
-            elif text_lower in ('rfp', 'rfq', 'rfi', 'itb', 'ifb'):
-                data['bid_type'] = text
-            elif re.match(r'\d{1,2}/\d{1,2}/\d{2,4}', text):
-                if not data['deadline']:
-                    data['deadline'] = text
-
-        return data
 
     def _parse_card(self, card):
         """Parse a card-style DOM element."""
@@ -230,6 +303,7 @@ class DelawareBidsScraper(BaseScraper):
         return {
             'title': title,
             'detail_url': detail_url,
+            'row_id': (card.get('id') or card.get('data-id') or '').strip() or None,
             'bid_number': None,
             'agency': None,
             'bid_type': None,
@@ -242,11 +316,23 @@ class DelawareBidsScraper(BaseScraper):
         if not title:
             return None
 
-        # Prefer bookmarkable Detail URLs if reachable
-        source_url = data.get('detail_url') or PORTAL_URL
-        if source_url and not source_url.startswith('http'):
-            # Delaware detail links often look like /Bids/Details/123
-            source_url = urllib.parse.urljoin(DETAIL_BASE, source_url)
+        # Prefer bookmarkable Detail URLs. When the SPA only exposes "#"
+        # hrefs (which it usually does), build a stable per-row anchor
+        # from the bid number / row id / title hash so that 20 rows on a
+        # single page don't all collapse onto PORTAL_URL and dedupe to one.
+        detail_url = (data.get('detail_url') or '').strip()
+        if detail_url and not detail_url.startswith('http'):
+            detail_url = urllib.parse.urljoin(DETAIL_BASE, detail_url)
+
+        if detail_url and 'Details/' in detail_url:
+            source_url = detail_url
+        else:
+            anchor = (
+                data.get('bid_number')
+                or data.get('row_id')
+                or title[:80].replace(' ', '_')
+            )
+            source_url = f"{PORTAL_URL}#{anchor}"
 
         deadline = parse_date(data['deadline']) if data.get('deadline') else None
 
