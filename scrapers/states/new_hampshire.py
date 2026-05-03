@@ -189,19 +189,28 @@ class NewHampshireBidsScraper(BaseScraper):
             return
 
         try:
-            resp = self.fetch_page(detail_url)
+            # Detail pages can be slow; allow more time than the default 15s
+            # (the QA wave 1 reported timeouts at 15s for slow NH detail pages).
+            resp = self.fetch_page(detail_url, timeout=45)
             if not resp:
                 return
 
             soup = self.parse_html(resp.text)
-            # Restrict text extraction to the main content area to avoid sidebars/footers
+            # Capture the full document first so downstream regex/eligibility
+            # extractors always have a string to work against, even when no
+            # specific content area is detected.
+            full_text = soup.get_text(separator='\n', strip=True)
             content_area = (
                 soup.find('div', id=re.compile(r'content|main|body', re.I)) or
                 soup.find('div', class_=re.compile(r'content|detail|body|article', re.I)) or
                 soup.find('article') or
                 soup.find('main')
             )
-            text_for_parsing = content_area.get_text(separator='\n', strip=True) if content_area else full_text
+            text_for_parsing = (
+                content_area.get_text(separator='\n', strip=True)
+                if content_area
+                else full_text
+            )
 
             if not opp.get('description') or len(opp.get('description', '')) < 50:
                 if content_area:

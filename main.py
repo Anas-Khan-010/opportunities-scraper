@@ -28,13 +28,54 @@ so no data is lost if the process is interrupted.
 """
 
 import sys
+import time
+import random
 from datetime import datetime
 from database.db import db
+from config.settings import config
 from utils.logger import logger
 from scrapers.grants_gov import GrantsGovScraper
 from scrapers.sam_gov import SAMGovScraper
 from scrapers.states import get_all_state_scrapers
 from scrapers.base_scraper import cleanup_selenium
+
+
+# Group B: scrapers whose source sites are blocked by network/IP factors
+# that no code change can fix from a fixed-IP server. They are skipped by
+# default to (a) not waste cycles and (b) not dig the IP-flag hole deeper
+# on every run. Set RUN_BLOCKED_SCRAPERS=true in .env to attempt them
+# anyway (e.g. when running from a residential connection or with a
+# residential proxy).
+KNOWN_BLOCKED_SCRAPERS = frozenset({
+    # Ivalua reCAPTCHA Enterprise — bot challenge can't be bypassed by uc
+    'AlabamaBuys',
+    'Maryland eMMA',
+    'OhioBuys',
+    # Cloudflare / CloudFront geo or ASN blocking
+    'Rhode Island OSP',
+    'Maine BGS Procurement',
+    # TCP-level firewall / decommissioned hosts
+    'Vermont Business Registry',
+    'Idaho Purchasing',
+    'SC Procurement',
+    'Nebraska DAS Purchasing',
+    'South Dakota BOA Procurement',
+    # Akamai WAF (no headless bypass works from datacenter IPs)
+    'Tennessee F&A Grants',
+    'Tennessee CPO RFP',
+    # Telerik RadAjax — headless Chrome renderer hangs/timeouts
+    'Wisconsin VendorNet',
+    # Azure Front Door 403 / decommissioned eMARS
+    'Kentucky Procurement',
+    # Dead DNS / decommissioned host
+    'Louisiana LaPAC',
+    # 404 SEARCH_URL + dead PeopleSoft SPA
+    'Kansas Procurement',
+    # DNS issues + JS-only SPA
+    'New Mexico GSD Purchasing',
+    # Geo-block from datacenter IPs
+    'Oklahoma OMES Procurement',
+})
 
 
 class ScraperOrchestrator:
@@ -47,6 +88,7 @@ class ScraperOrchestrator:
             'total_inserted': 0,
             'total_duplicates': 0,
             'total_errors': 0,
+            'total_skipped': 0,
         }
 
     def register_scrapers(self):
@@ -59,10 +101,39 @@ class ScraperOrchestrator:
         # 2 ── SAM.gov (federal contracts) ─────────────────────────────
         self.scrapers.append(SAMGovScraper())
 
-        # 3 ── State scrapers (AK, CA, DE, IL, MI, MN, MT, NH, NJ, NY, ND, TX, NC)
+        # 3 ── State scrapers (50-state coverage)
         self.scrapers.extend(get_all_state_scrapers())
 
+        if not config.RUN_BLOCKED_SCRAPERS:
+            blocked = [s for s in self.scrapers if s.source_name in KNOWN_BLOCKED_SCRAPERS]
+            self.scrapers = [s for s in self.scrapers if s.source_name not in KNOWN_BLOCKED_SCRAPERS]
+            self.stats['total_skipped'] = len(blocked)
+            if blocked:
+                logger.warning(
+                    "Skipping %d scrapers known to require network/IP changes "
+                    "(set RUN_BLOCKED_SCRAPERS=true to attempt anyway):",
+                    len(blocked),
+                )
+                for s in blocked:
+                    logger.warning(f"  - {s.source_name}")
+
         logger.info(f"Registered {len(self.scrapers)} scrapers")
+
+    def _inter_scraper_pause(self):
+        """Sleep a randomised pause between scrapers.
+
+        On a fixed deployment IP, running 50+ scrapers back-to-back creates
+        a burst pattern that gov-site WAFs love to flag. A jittered pause
+        here makes the run look less crawler-like and lets per-host
+        cooldowns expire between scrapers that hit overlapping CDN edges.
+        """
+        lo = max(0.0, config.INTER_SCRAPER_DELAY_MIN)
+        hi = max(lo, config.INTER_SCRAPER_DELAY_MAX)
+        if hi <= 0:
+            return
+        delay = random.uniform(lo, hi)
+        logger.info(f"  Polite inter-scraper pause: {delay:.1f}s")
+        time.sleep(delay)
 
     def run_scrapers(self):
         """Run all registered scrapers"""
@@ -71,10 +142,10 @@ class ScraperOrchestrator:
         logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 80)
 
-        for scraper in self.scrapers:
+        for idx, scraper in enumerate(self.scrapers):
             try:
                 logger.info(f"\n{'=' * 60}")
-                logger.info(f"Running scraper: {scraper.source_name}")
+                logger.info(f"Running scraper [{idx + 1}/{len(self.scrapers)}]: {scraper.source_name}")
                 logger.info(f"{'=' * 60}")
 
                 opportunities = scraper.scrape()
@@ -99,6 +170,14 @@ class ScraperOrchestrator:
                 self.stats['total_duplicates'] += getattr(scraper, '_dup_count', 0)
                 self.stats['total_errors'] += 1
                 continue
+            finally:
+                if idx < len(self.scrapers) - 1:
+                    try:
+                        self._inter_scraper_pause()
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        pass
 
     def print_summary(self):
         """Print scraping session summary"""
@@ -109,6 +188,7 @@ class ScraperOrchestrator:
         logger.info(f"New opportunities inserted:  {self.stats['total_inserted']}")
         logger.info(f"Duplicates skipped:          {self.stats['total_duplicates']}")
         logger.info(f"Errors encountered:          {self.stats['total_errors']}")
+        logger.info(f"Blocked scrapers skipped:    {self.stats['total_skipped']}")
 
         db_stats = db.get_stats()
         if db_stats:

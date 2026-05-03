@@ -4,8 +4,12 @@ New Jersey DHS RFP/RFA/RFI scraper — nj.gov/humanservices
 Scrapes Requests for Proposals, Applications, and Information from the
 NJ Department of Human Services notices page.
 
-The page returns 403 with plain requests, so Selenium is used to load
-the listing. Three separate HTML tables are parsed:
+NOTE: The NJ DHS portal sits behind Imperva/Incapsula bot protection.
+Imperva's anti-headless JS sensor reliably crashes headless Chrome,
+but plain ``requests`` (with browsery headers) is allowed through.
+We therefore use requests-only here — no Selenium driver is needed.
+
+Three separate HTML tables are parsed:
   1. Request For Proposals (RFPs)
   2. Request For Applications (RFAs)
   3. Request For Information / Letters of Interest (RFI/RLI)
@@ -16,12 +20,10 @@ description, eligibility, and funding_amount from each RFP's document.
 Source: https://www.nj.gov/humanservices/notices/grants/proposals/
 """
 
-import time
-import random
 import re
 import urllib.parse
 
-from scrapers.base_scraper import BaseScraper, SeleniumDriverManager, SELENIUM_DELAY_RANGE
+from scrapers.base_scraper import BaseScraper
 from utils.logger import logger
 from utils.helpers import clean_text, parse_date, categorize_opportunity
 
@@ -31,40 +33,31 @@ NJ_BASE = "https://www.nj.gov"
 
 
 class NewJerseyDHSScraper(BaseScraper):
-    """Scrapes NJ DHS RFPs/RFAs/RFIs with PDF enrichment."""
+    """Scrapes NJ DHS RFPs/RFAs/RFIs with PDF enrichment (requests-only)."""
 
     def __init__(self):
         super().__init__("New Jersey DHS")
 
     def scrape(self):
-        logger.info("Starting New Jersey DHS scraper (Selenium + PDF enrichment)...")
+        logger.info("Starting New Jersey DHS scraper (requests + PDF enrichment)...")
+        # Imperva blocks bare User-Agents, so make sure our session reads as a
+        # real browser session (BaseScraper already rotates these per attempt).
+        # We also set a Referer to the parent landing page to look natural.
+        self.session.headers.update({
+            'Referer': 'https://www.nj.gov/humanservices/',
+            'Accept': (
+                'text/html,application/xhtml+xml,application/xml;q=0.9,'
+                'image/avif,image/webp,*/*;q=0.8'
+            ),
+        })
 
-        driver = SeleniumDriverManager.get_driver()
-        if driver is None:
-            logger.error("Selenium driver unavailable — skipping New Jersey")
+        resp = self.fetch_page(PORTAL_URL, timeout=30)
+        if resp is None:
+            logger.error("New Jersey: failed to fetch portal page")
+            self.log_summary()
             return self.opportunities
 
-        self._scrape_page(driver)
-        self.log_summary()
-        return self.opportunities
-
-    def _scrape_page(self, driver):
-        from selenium.webdriver.support.ui import WebDriverWait
-
-        try:
-            driver.get(PORTAL_URL)
-            time.sleep(random.uniform(*SELENIUM_DELAY_RANGE))
-
-            WebDriverWait(driver, 30).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
-            )
-            time.sleep(random.uniform(3, 6))
-
-        except Exception as exc:
-            logger.error(f"New Jersey: failed to load page: {exc}")
-            return
-
-        soup = self.parse_html(driver.page_source)
+        soup = self.parse_html(resp.text)
         tables = soup.find_all('table')
         logger.info(f"New Jersey DHS: found {len(tables)} tables on page")
 
@@ -89,6 +82,9 @@ class NewJerseyDHSScraper(BaseScraper):
                     if not opp.get('opportunity_number'):
                         self._extract_opp_number_from_urls(opp)
                     self.add_opportunity(opp)
+
+        self.log_summary()
+        return self.opportunities
 
     def _parse_row(self, row, section_type):
         """Parse a single table row from any of the three NJ DHS tables."""

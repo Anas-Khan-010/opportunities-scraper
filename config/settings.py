@@ -25,8 +25,35 @@ class Config:
     MAX_NEW_PER_SCRAPER = int(os.getenv('MAX_NEW_PER_SCRAPER', '100'))
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 
+    # Minimum gap (seconds) between consecutive requests to the same host.
+    # Enforced across ALL scraper instances in the process to keep us
+    # below trigger thresholds of common gov-site WAFs / rate limiters.
+    PER_HOST_MIN_INTERVAL = float(os.getenv('PER_HOST_MIN_INTERVAL', '2.0'))
+
     SELENIUM_DELAY_MIN = float(os.getenv('SELENIUM_DELAY_MIN', '4'))
     SELENIUM_DELAY_MAX = float(os.getenv('SELENIUM_DELAY_MAX', '9'))
+
+    # Polite delay between consecutive scrapers in the orchestrator.
+    # On a fixed deployment IP (e.g. Chris's server), running 50+ scrapers
+    # back-to-back creates an unmistakable burst pattern. Inserting a
+    # randomised pause makes the traffic look less like a crawler and gives
+    # gov-site WAFs time to forget us between hits. Range is in seconds.
+    INTER_SCRAPER_DELAY_MIN = float(os.getenv('INTER_SCRAPER_DELAY_MIN', '15'))
+    INTER_SCRAPER_DELAY_MAX = float(os.getenv('INTER_SCRAPER_DELAY_MAX', '45'))
+
+    # Free-proxy switch. The fp.fp.FreeProxy package returns dead/slow
+    # proxies more often than not, which causes the shared Chrome driver to
+    # restart between every scraper that asks for use_proxy=True (driver
+    # thrash). Default OFF — set ENABLE_FREE_PROXY=true only if you have a
+    # working free-proxy source.
+    ENABLE_FREE_PROXY = os.getenv('ENABLE_FREE_PROXY', 'false').lower() == 'true'
+
+    # Disable scrapers known to require network/IP changes that no code fix
+    # can solve (Group B). Default ON — they are skipped with a clear log
+    # message instead of wasting cycles + risking IP flags. Set
+    # RUN_BLOCKED_SCRAPERS=true to attempt them anyway (e.g. from a server
+    # with a residential exit IP).
+    RUN_BLOCKED_SCRAPERS = os.getenv('RUN_BLOCKED_SCRAPERS', 'false').lower() == 'true'
 
     # ── 1. Grants.gov ──────────────────────────────────────────────────
     GRANTS_GOV_BASE_URL = os.getenv('GRANTS_GOV_BASE_URL', 'https://www.grants.gov')

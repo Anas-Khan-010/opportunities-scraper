@@ -5,7 +5,17 @@ psycopg2-binary==2.9.9
 python-dotenv==1.0.1
 selenium==4.18.1
 undetected-chromedriver>=3.5.0
-setuptools>=65.0.0
+# IMPORTANT: setuptools must stay <74 because undetected-chromedriver 3.5.5
+# imports `distutils.version` which was removed from setuptools 74+ (Python 3.12).
+# Bumping past this without upgrading UC will break Chrome startup.
+setuptools>=65.0.0,<74
 PyPDF2==3.0.1
+pycryptodome>=3.20.0
+PyMuPDF>=1.24.0
 python-dateutil==2.8.2
 cloudscraper>=1.2.71
+brotli>=1.1.0
+# Used by SeleniumDriverManager when use_proxy=True (BaseIvaluaScraper, etc.).
+# Without this, proxy-requiring scrapers silently degrade to direct connection
+# and get blocked by the WAF on portals that require non-DC IPs.
+free-proxy>=1.1.0

@@ -290,10 +290,25 @@ class VirginiaEVAScraper(BaseScraper):
             return self.opportunities
 
         try:
-            driver.get(self.LANDING_URL)
-            time.sleep(4)
+            # Landing page is a soft preflight (cookie/Referer for the JSP).
+            # Wrap in a short timeout so a slow CDN doesn't burn a minute.
+            try:
+                driver.set_page_load_timeout(20)
+                driver.get(self.LANDING_URL)
+                time.sleep(2)
+            except Exception as exc:
+                logger.debug("%s: landing-page preflight skipped: %s",
+                             self.source_name, exc)
+            finally:
+                try:
+                    driver.set_page_load_timeout(45)
+                except Exception:
+                    pass
+            # Re-bind in case safe_get rebuilt the driver during landing.
+            driver = SeleniumDriverManager._driver or driver
             driver.get(self.LISTING_URL)
             time.sleep(12)
+            driver = SeleniumDriverManager._driver or driver
             html = driver.page_source
         except Exception as exc:
             logger.error("%s: failed to load VBO: %s", self.source_name, exc)
@@ -301,9 +316,14 @@ class VirginiaEVAScraper(BaseScraper):
             return self.opportunities
 
         soup = self.parse_html(html)
-        if soup.title and "403" in soup.title.get_text():
+        page_text = (soup.get_text(" ", strip=True) or "")[:500]
+        if (
+            (soup.title and "403" in soup.title.get_text())
+            or "403 Forbidden" in page_text
+            or "AWS WAF" in page_text
+        ):
             logger.warning(
-                "%s: AWS WAF returned 403 — the eVA public JSP is blocking "
+                "%s: WAF/403 detected — the eVA public JSP is blocking "
                 "this IP. Try again from a residential connection.",
                 self.source_name,
             )
@@ -337,11 +357,95 @@ class VirginiaEVAScraper(BaseScraper):
             if self.reached_limit():
                 break
             opp = self.parse_opportunity(row)
-            if opp:
-                self.add_opportunity(opp)
+            if not opp:
+                continue
+            try:
+                self._enrich_detail(driver, opp)
+                if opp.get("document_urls"):
+                    self.enrich_from_documents(opp)
+            except Exception as exc:
+                logger.debug("VA eVA: detail enrichment failed for %s: %s",
+                             opp.get("source_url"), exc)
+            self.add_opportunity(opp)
 
         self.log_summary()
         return self.opportunities
+
+    def _enrich_detail(self, driver, opp):
+        """Fetch the eVA detail page and backfill eligibility/funding/deadline.
+
+        eVA's public JSP shows a simple key/value layout; we tolerate
+        missing labels by checking each one independently.
+        """
+        url = opp.get("source_url", "")
+        if not url or "cgieva.com" not in url:
+            return
+        try:
+            driver.get(url)
+            time.sleep(4)
+            # Re-bind in case safe_get rebuilt the driver during this hop.
+            driver = SeleniumDriverManager._driver or driver
+            soup = self.parse_html(driver.page_source)
+        except Exception as exc:
+            logger.debug("VA eVA: selenium load failed %s: %s", url, exc)
+            return
+
+        text = soup.get_text("\n", strip=True)
+        if "403 Forbidden" in text or "AWS WAF" in text:
+            return
+
+        def _after(label, max_len=600):
+            pat = re.compile(rf"(?mi)^\s*{re.escape(label)}\s*:?\s*$")
+            m = pat.search(text)
+            if not m:
+                pat2 = re.compile(rf"(?i)\b{re.escape(label)}\s*[:\-]\s*([^\n]+)")
+                m2 = pat2.search(text)
+                return m2.group(1).strip() if m2 else None
+            return text[m.end():m.end() + max_len].strip() or None
+
+        desc = _after("Description", 1200) or _after("Summary", 800)
+        if desc and (not opp.get("description") or len(opp.get("description") or "") < 200):
+            opp["description"] = desc[:2000]
+
+        if not opp.get("deadline"):
+            for label in ("Response Deadline", "Closing Date", "Due Date", "Bid Open Date"):
+                val = _after(label, 80)
+                if val:
+                    d = parse_date(val.split("\n")[0])
+                    if d:
+                        opp["deadline"] = d
+                        break
+
+        if not opp.get("eligibility"):
+            elig = _after("Eligibility", 800) or _after("Set-Aside", 200)
+            if elig:
+                opp["eligibility"] = elig[:1000]
+
+        if not opp.get("funding_amount"):
+            from utils.helpers import extract_funding_amount
+            amt = extract_funding_amount(text, require_keyword=True)
+            if amt:
+                opp["funding_amount"] = amt
+
+        org = _after("Issuing Agency", 120) or _after("Buyer Agency", 120)
+        if org:
+            opp["organization"] = org.split("\n")[0].strip()[:200]
+
+        doc_urls = []
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "").strip()
+            if href.lower().endswith((".pdf", ".doc", ".docx", ".xlsx", ".zip")):
+                full = href if href.startswith("http") else self.BASE + "/" + href.lstrip("/")
+                if full not in doc_urls:
+                    doc_urls.append(full)
+        if doc_urls:
+            opp["document_urls"] = doc_urls[:10]
+
+        if not opp.get("eligibility"):
+            opp["eligibility"] = (
+                "Open to vendors registered with eVA in good standing; see "
+                "solicitation documents for any procurement-specific qualifications."
+            )
 
     def parse_opportunity(self, row):
         try:
@@ -354,14 +458,16 @@ class VirginiaEVAScraper(BaseScraper):
             for c in cells:
                 a = c.find("a", href=True)
                 if a:
-                    link = a
-                    break
-            if not link:
-                return None
+                    href = (a.get("href") or "").strip()
+                    if href and not href.lower().startswith(("javascript:", "mailto:", "#")):
+                        link = a
+                        break
 
-            href = link["href"].strip()
-            detail_url = href if href.startswith("http") else self.BASE + "/" + href.lstrip("/")
-            title = clean_text(link.get_text()) or next((t for t in texts if t), "")
+            href = link["href"].strip() if link else ""
+            detail_url = href if href.startswith("http") else (self.BASE + "/" + href.lstrip("/")) if href else ""
+            title = (
+                clean_text(link.get_text()) if link else None
+            ) or next((t for t in texts if t), "")
             if not title:
                 return None
 
@@ -382,6 +488,9 @@ class VirginiaEVAScraper(BaseScraper):
                     continue
                 description_parts.append(t)
 
+            anchor = opp_number or title[:80].replace(" ", "_")
+            source_url = detail_url or f"{self.LISTING_URL}#{anchor}"
+
             return {
                 "title": title[:300],
                 "organization": "Commonwealth of Virginia",
@@ -392,7 +501,7 @@ class VirginiaEVAScraper(BaseScraper):
                 "category": categorize_opportunity(title, ""),
                 "location": "Virginia",
                 "source": self.source_name,
-                "source_url": detail_url,
+                "source_url": source_url,
                 "opportunity_number": opp_number,
                 "posted_date": posted,
                 "document_urls": [],

@@ -64,12 +64,21 @@ class FloridaDOSGrantsScraper(BaseScraper):
         return self.opportunities
 
     def parse_opportunity(self, item):
-        guid = item.get('Guid')
+        # Kendo Grid JSON ships an integer "Id", not "Guid". Falling back to a
+        # generic URL collapses every record onto the same source_url and the
+        # ON CONFLICT upsert ends up persisting only one row per run.
+        program_id = item.get('Id') or item.get('Guid')
         title = item.get('Name')
         if not title:
             return None
-            
-        detail_url = f"https://dosgrants.com/Program/Details/{guid}" if guid else "https://dosgrants.com/Program"
+
+        program_code = item.get('ProgramCode')
+        if program_id is not None:
+            detail_url = f"https://dosgrants.com/Program/Details/{program_id}"
+        elif program_code:
+            detail_url = f"https://dosgrants.com/Program/Details/{program_code}"
+        else:
+            detail_url = "https://dosgrants.com/Program"
         
         description_raw = item.get('PD', '')
         description = clean_text(re.sub(r'<[^>]+>', ' ', description_raw))

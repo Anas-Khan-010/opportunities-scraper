@@ -36,32 +36,77 @@ class HawaiiHANDSScraper(BaseScraper):
             driver.get(self.SEARCH_URL)
             time.sleep(random.uniform(8, 12))  # SPA needs time to render
 
-            html = driver.page_source
-            soup = BeautifulSoup(html, 'html.parser')
+            page = 1
+            seen_keys = set()
+            while page <= 10 and not self.reached_limit():
+                html = driver.page_source
+                soup = BeautifulSoup(html, 'html.parser')
 
-            table = soup.find('table')
-            if not table:
-                logger.warning("No table found on Hawaii HANDS page")
-                self.log_summary()
-                return self.opportunities
-
-            rows = table.find_all('tr')
-            data_rows = [r for r in rows if r.find('td')]
-
-            for row in data_rows:
-                if self.reached_limit():
+                # HANDS renders multiple tables; pick the one with the most data rows
+                tables = soup.find_all('table')
+                if not tables:
+                    logger.warning("No table found on Hawaii HANDS page")
                     break
-                opp = self.parse_opportunity(row)
-                if opp:
-                    self.add_opportunity(opp)
 
-            logger.info(f"  Parsed {len(data_rows)} rows from Hawaii HANDS")
+                table = max(
+                    tables,
+                    key=lambda t: len([r for r in t.find_all('tr') if r.find('td')]),
+                )
+                rows = table.find_all('tr')
+                data_rows = [r for r in rows if r.find('td')]
+                if not data_rows:
+                    logger.info(f"Hawaii HANDS: no data rows on page {page}, stopping.")
+                    break
+
+                page_new = 0
+                for row in data_rows:
+                    if self.reached_limit():
+                        break
+                    opp = self.parse_opportunity(row)
+                    if not opp:
+                        continue
+                    key = opp.get('source_url')
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    if self.add_opportunity(opp):
+                        page_new += 1
+
+                logger.info(
+                    f"Hawaii HANDS: page {page} — {len(data_rows)} rows, {page_new} new"
+                )
+
+                if self.reached_limit() or not self._go_to_next_page(driver):
+                    break
+                page += 1
+                time.sleep(random.uniform(3, 6))
 
         except Exception as e:
             logger.error(f"Error scraping Hawaii HANDS: {e}")
 
         self.log_summary()
         return self.opportunities
+
+    def _go_to_next_page(self, driver):
+        """Click HANDS' 'Next' pager link if present."""
+        from selenium.webdriver.common.by import By
+        try:
+            candidates = driver.find_elements(
+                By.CSS_SELECTOR,
+                'a.next, a[aria-label="Next"], li.next a, a.paginate_button.next',
+            )
+            for el in candidates:
+                cls = (el.get_attribute('class') or '').lower()
+                if 'disabled' in cls:
+                    continue
+                if not el.is_displayed() or not el.is_enabled():
+                    continue
+                el.click()
+                time.sleep(random.uniform(4, 7))
+                return True
+        except Exception as exc:
+            logger.debug(f"Hawaii HANDS: pagination failed: {exc}")
+        return False
 
     def parse_opportunity(self, row):
         """
@@ -103,22 +148,33 @@ class HawaiiHANDSScraper(BaseScraper):
             org_parts = [p for p in [jurisdiction, department] if p]
             org = ' - '.join(org_parts) if org_parts else 'State of Hawaii'
 
-            # Links
+            # Links — reject javascript:/#/mailto: hrefs BEFORE prepending host
             links = row.find_all('a', href=True)
             detail_url = None
             doc_urls = []
             for link in links:
-                href = link['href']
+                href = (link.get('href') or '').strip()
+                if not href:
+                    continue
+                hl = href.lower()
+                if hl.startswith(('javascript:', 'mailto:', '#')):
+                    continue
                 if not href.startswith('http'):
                     href = f"https://hands.ehawaii.gov{href}"
-                if href.endswith('.pdf'):
+                if hl.endswith('.pdf'):
                     doc_urls.append(href)
-                elif '/hands/opportunities/' in href:
+                elif '/hands/opportunities/' in hl:
                     detail_url = href
-                elif not detail_url and href != '#':
+                elif not detail_url:
                     detail_url = href
 
-            source_url = detail_url or self.SEARCH_URL
+            # Build a stable per-row fallback so dedup doesn't collapse every
+            # row to SEARCH_URL on listing-only views.
+            if detail_url:
+                source_url = detail_url
+            else:
+                anchor = opp_number or title[:80].replace(' ', '_')
+                source_url = f"{self.SEARCH_URL}#{anchor}"
 
             # Map raw category
             category = categorize_opportunity(title, category_raw)

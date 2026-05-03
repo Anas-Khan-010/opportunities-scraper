@@ -1,52 +1,93 @@
 import re
 import os
+import random
 import requests
 from PyPDF2 import PdfReader
 from io import BytesIO
 from utils.logger import logger
 from config.settings import config
 
+# Browser-like headers required by many gov sites that 403 plain requests
+_PDF_HEADERS = {
+    'User-Agent': random.choice(config.USER_AGENTS),
+    'Accept': 'application/pdf,application/octet-stream,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
+
+
 class DocumentParser:
     """Utility class for parsing documents"""
-    
+
     @staticmethod
-    def download_pdf(url, filename=None):
-        """Download PDF from URL"""
+    def download_pdf(url, filename=None, timeout=15):
+        """Download PDF from URL with browser-like headers and 403 fallback."""
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=timeout, headers=_PDF_HEADERS)
+            if response.status_code == 403:
+                try:
+                    import cloudscraper
+                    scraper = cloudscraper.create_scraper(
+                        browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+                    )
+                    response = scraper.get(url, timeout=timeout, headers=_PDF_HEADERS)
+                except Exception:
+                    pass
+
             response.raise_for_status()
-            
+
             if filename:
                 filepath = os.path.join(config.DOWNLOADS_DIR, filename)
                 with open(filepath, 'wb') as f:
                     f.write(response.content)
                 return filepath
-            
+
             return BytesIO(response.content)
-            
+
         except Exception as e:
-            logger.error(f"Error downloading PDF from {url}: {e}")
+            logger.debug(f"Error downloading PDF from {url}: {e}")
             return None
-    
+
     @staticmethod
     def extract_text_from_pdf(pdf_source):
-        """Extract text from PDF file or BytesIO object"""
+        """Extract text from a PDF.
+
+        Try PyPDF2 first; on failure (encrypted, corrupt, AES) fall back to
+        PyMuPDF (fitz) which handles a wider range of PDFs.
+        """
+        raw_bytes = None
+        if isinstance(pdf_source, BytesIO):
+            raw_bytes = pdf_source.getvalue()
+
         try:
-            if isinstance(pdf_source, str):
-                # File path
-                reader = PdfReader(pdf_source)
+            if raw_bytes is not None:
+                reader = PdfReader(BytesIO(raw_bytes))
             else:
-                # BytesIO object
                 reader = PdfReader(pdf_source)
-            
             text = ""
             for page in reader.pages:
-                text += page.extract_text() + "\n"
-            
-            return text.strip()
-            
+                page_text = page.extract_text() or ""
+                text += page_text + "\n"
+            text = text.strip()
+            if text:
+                return text
         except Exception as e:
-            logger.error(f"Error extracting text from PDF: {e}")
+            logger.debug(f"PyPDF2 failed, trying PyMuPDF fallback: {e}")
+
+        try:
+            import fitz
+            if raw_bytes is not None:
+                doc = fitz.open(stream=raw_bytes, filetype='pdf')
+            else:
+                doc = fitz.open(pdf_source)
+            try:
+                text = ""
+                for page in doc:
+                    text += page.get_text() + "\n"
+                return text.strip() or None
+            finally:
+                doc.close()
+        except Exception as e:
+            logger.debug(f"PyMuPDF also failed: {e}")
             return None
     
     @staticmethod
@@ -203,7 +244,7 @@ class OpportunityEnricher:
                 opportunity['eligibility'] = eligibility
 
         if not opportunity.get('funding_amount'):
-            amount = extract_funding_amount(full_text)
+            amount = extract_funding_amount(full_text, require_keyword=True)
             if amount:
                 opportunity['funding_amount'] = amount
 
